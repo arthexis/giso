@@ -9,6 +9,10 @@ def math__triple(value):
     return value * 3
 
 
+def text__upper(value):
+    return value.upper()
+
+
 def test_giso_accumulates_operation_results_and_returns_values():
     g = Giso(math__double, math__triple)
 
@@ -45,3 +49,48 @@ def test_derived_giso_has_independent_results():
     assert child.math.double(4) == 8
     assert g.results.history == ()
     assert child.results.history == (("math.double", 8),)
+
+
+def test_folding_giso_replays_source_results_into_target():
+    source = Giso(math__double)
+    target = Giso(text__upper)
+
+    source.math.double(2)
+    source.math.double(5)
+    target.text.upper("before")
+
+    target += source
+
+    assert target.results.history == (
+        ("text.upper", "BEFORE"),
+        ("math.double", 4),
+        ("math.double", 10),
+    )
+    assert target.results["math.double"] == 10
+    assert source.results.history == (
+        ("math.double", 4),
+        ("math.double", 10),
+    )
+
+
+def test_plus_combines_result_histories_without_sharing_results():
+    left = Giso(math__double)
+    right = Giso(text__upper)
+
+    left.math.double(3)
+    right.text.upper("giso")
+
+    combined = left + right
+
+    assert combined.results.history == (
+        ("math.double", 6),
+        ("text.upper", "GISO"),
+    )
+    assert combined.results is not left.results
+    assert combined.results is not right.results
+
+    combined.math.double(4)
+
+    assert combined.results.history[-1] == ("math.double", 8)
+    assert left.results.history == (("math.double", 6),)
+    assert right.results.history == (("text.upper", "GISO"),)
