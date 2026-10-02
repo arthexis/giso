@@ -11,6 +11,10 @@ def math__double(value: int) -> int:
     return value * 2
 
 
+def text__upper(value: str) -> str:
+    return value.upper()
+
+
 class DiagramTool:
     def validate(self, value: str) -> str:
         return f"valid:{value}"
@@ -73,3 +77,41 @@ def test_ignores_imported_callables_when_folding_module(tmp_path: Path):
 
     assert giso.local() == "mine"
     assert "Path" not in giso.operations
+
+
+def test_fold_accepts_another_giso():
+    target = Giso(math__double)
+    ingredient = Giso(text__upper)
+
+    returned = target.fold(ingredient)
+
+    assert returned is target
+    assert target.math.double(3) == 6
+    assert target.text.upper("stew") == "STEW"
+    assert ingredient.text.upper("soup") == "SOUP"
+
+
+def test_folding_giso_keeps_results_independent():
+    ingredient = Giso(text__upper)
+    target = Giso(ingredient)
+
+    assert target.text is not ingredient.text
+
+    target.text.upper("stew")
+
+    assert target.results["text.upper"] == "STEW"
+    assert len(ingredient.results) == 0
+
+
+def test_plus_can_combine_two_gisos_without_mutating_either():
+    left = Giso(math__double)
+    right = Giso(text__upper)
+
+    combined = left + right
+
+    assert combined is not left
+    assert combined is not right
+    assert combined.math.double(4) == 8
+    assert combined.text.upper("giso") == "GISO"
+    assert not hasattr(left, "text")
+    assert not hasattr(right, "math")
