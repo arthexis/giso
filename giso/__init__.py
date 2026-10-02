@@ -1,3 +1,3 @@
-from .core import Giso, Namespace
+from .core import Giso, Namespace, Sigil
 
-__all__ = ["Giso", "Namespace"]
+__all__ = ["Giso", "Namespace", "Sigil"]
