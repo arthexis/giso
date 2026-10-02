@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import functools
+import importlib
 import importlib.util
 import inspect
 import pathlib
@@ -131,8 +132,10 @@ class Giso:
                 continue
             if isinstance(source, Giso):
                 self._fold_giso(source)
-            elif isinstance(source, (str, pathlib.Path)):
-                self._fold_path(pathlib.Path(source))
+            elif isinstance(source, pathlib.Path):
+                self._fold_path(source)
+            elif isinstance(source, str):
+                self._fold_string(source)
             elif inspect.isclass(source) or callable(source) or isinstance(source, ModuleType):
                 self._attach_component(source)
             else:
@@ -259,6 +262,27 @@ class Giso:
                 yield from self._flatten(value)
             else:
                 yield value
+
+    def _fold_string(self, source: str) -> None:
+        """Fold a string as an existing path first, otherwise as an importable module name."""
+        path = pathlib.Path(source).expanduser()
+        if path.exists():
+            self._fold_path(path)
+            return
+
+        module_name = source.replace("\\", "/").strip("/").replace("/", ".")
+        if module_name.endswith(".py"):
+            module_name = module_name[:-3]
+        if not module_name:
+            raise ValueError("Cannot fold an empty module name")
+
+        try:
+            module = importlib.import_module(module_name)
+        except ModuleNotFoundError as exc:
+            raise ValueError(f"Cannot fold path or import module: {source}") from exc
+
+        self.modules[module.__name__] = module
+        self._attach_component(module)
 
     def _fold_path(self, path: pathlib.Path) -> None:
         path = path.expanduser().resolve()
