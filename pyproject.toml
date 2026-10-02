@@ -11,6 +11,9 @@ license = {text = "MIT"}
 authors = [{name = "arthexis"}]
 dependencies = []
 
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["giso*"]
