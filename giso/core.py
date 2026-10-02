@@ -106,7 +106,7 @@ class Sigil:
 
 
 class Giso:
-    """A live object that can fold Python modules, classes, and callables into itself."""
+    """A live object that can fold Python modules, classes, callables, and other Gisos into itself."""
 
     def __init__(self, *sources: Any, name: str = "giso"):
         self.__name__ = name
@@ -118,11 +118,13 @@ class Giso:
             self.fold(*sources)
 
     def fold(self, *sources: Any) -> "Giso":
-        """Fold supported Python sources into this Giso and mutate it in place."""
+        """Fold supported sources into this Giso and mutate it in place."""
         for source in self._flatten(sources):
             if source is None:
                 continue
-            if isinstance(source, (str, pathlib.Path)):
+            if isinstance(source, Giso):
+                self._fold_giso(source)
+            elif isinstance(source, (str, pathlib.Path)):
                 self._fold_path(pathlib.Path(source))
             elif inspect.isclass(source) or callable(source) or isinstance(source, ModuleType):
                 self._attach_component(source)
@@ -143,13 +145,18 @@ class Giso:
     def _clone(self) -> "Giso":
         """Clone this Giso's current capability surface without sharing namespaces."""
         derived = type(self)(name=self.__name__)
-        derived.modules = dict(self.modules)
-
-        for operation_name, operation in self.operations.items():
-            original = getattr(operation, "__giso_original__", operation)
-            derived._attach_operation(operation_name, original)
-
+        derived._fold_giso(self)
         return derived
+
+    def _fold_giso(self, source: "Giso") -> None:
+        """Fold another Giso's current capability surface into this one."""
+        if source is self:
+            return
+
+        self.modules.update(source.modules)
+        for operation_name, operation in source.operations.items():
+            original = getattr(operation, "__giso_original__", operation)
+            self._attach_operation(operation_name, original)
 
     def __getitem__(self, key: Any) -> Any:
         """Resolve a value now, or return a lazy Sigil for the double-bracket form."""
