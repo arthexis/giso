@@ -84,6 +84,36 @@ class Giso:
                 raise TypeError(f"Unsupported source type: {type(source).__name__}")
         return self
 
+    def __iadd__(self, source: Any) -> "Giso":
+        """Ingest a source into this Giso and return the same instance."""
+        return self.ingest(source)
+
+    def __add__(self, source: Any) -> "Giso":
+        """Return a new Giso with this capability surface plus one source."""
+        derived = self._clone()
+        derived.ingest(source)
+        return derived
+
+    def _clone(self) -> "Giso":
+        """Clone this Giso's current capability surface without sharing namespaces."""
+        derived = type(self)(name=self.__name__)
+        derived.modules = dict(self.modules)
+
+        for operation_name, operation in self.operations.items():
+            if "." in operation_name:
+                namespace_name, name = operation_name.split(".", 1)
+                namespace = derived.namespaces.get(namespace_name)
+                if namespace is None:
+                    namespace = Namespace(f"{derived.__name__}.{namespace_name}")
+                    derived.namespaces[namespace_name] = namespace
+                    setattr(derived, namespace_name, namespace)
+                setattr(namespace, name, operation)
+            else:
+                setattr(derived, operation_name, operation)
+            derived.operations[operation_name] = operation
+
+        return derived
+
     def __getitem__(self, key: Any) -> Any:
         """Resolve a value now, or return a lazy Sigil for the double-bracket form."""
         if isinstance(key, list):
