@@ -6,8 +6,53 @@ import inspect
 import pathlib
 import re
 import sys
+from collections.abc import Iterator, MutableMapping
 from types import ModuleType
 from typing import Any, Callable
+
+
+class Results(MutableMapping[str, Any]):
+    """Accumulated results produced by operations executed through a Giso."""
+
+    def __init__(self):
+        self._latest: dict[str, Any] = {}
+        self._history: list[tuple[str, Any]] = []
+
+    def add(self, operation: str, value: Any) -> Any:
+        """Record a result and return the value unchanged."""
+        self._latest[operation] = value
+        self._history.append((operation, value))
+        return value
+
+    @property
+    def history(self) -> tuple[tuple[str, Any], ...]:
+        """Return all recorded operation results in call order."""
+        return tuple(self._history)
+
+    @property
+    def last(self) -> Any:
+        """Return the most recently recorded value, or None when empty."""
+        if not self._history:
+            return None
+        return self._history[-1][1]
+
+    def __getitem__(self, key: str) -> Any:
+        return self._latest[key]
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        self.add(key, value)
+
+    def __delitem__(self, key: str) -> None:
+        del self._latest[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._latest)
+
+    def __len__(self) -> int:
+        return len(self._latest)
+
+    def __repr__(self) -> str:
+        return repr(self._latest)
 
 
 class Namespace:
@@ -68,6 +113,7 @@ class Giso:
         self.modules: dict[str, ModuleType] = {}
         self.namespaces: dict[str, Namespace] = {}
         self.operations: dict[str, Callable[..., Any]] = {}
+        self.results = Results()
         if sources:
             self.ingest(*sources)
 
@@ -100,17 +146,8 @@ class Giso:
         derived.modules = dict(self.modules)
 
         for operation_name, operation in self.operations.items():
-            if "." in operation_name:
-                namespace_name, name = operation_name.split(".", 1)
-                namespace = derived.namespaces.get(namespace_name)
-                if namespace is None:
-                    namespace = Namespace(f"{derived.__name__}.{namespace_name}")
-                    derived.namespaces[namespace_name] = namespace
-                    setattr(derived, namespace_name, namespace)
-                setattr(namespace, name, operation)
-            else:
-                setattr(derived, operation_name, operation)
-            derived.operations[operation_name] = operation
+            original = getattr(operation, "__giso_original__", operation)
+            derived._attach_operation(operation_name, original)
 
         return derived
 
@@ -133,7 +170,7 @@ class Giso:
                 continue
             try:
                 value = getattr(value, part)
-            except AttributeError as exc:
+            except AttributeError:
                 try:
                     value = value[part]
                 except (KeyError, IndexError, TypeError, AttributeError) as item_exc:
@@ -192,12 +229,6 @@ class Giso:
 
     def _attach_class(self, cls: type) -> None:
         namespace_name = self._snake_case(cls.__name__)
-        namespace = self.namespaces.get(namespace_name)
-        if namespace is None:
-            namespace = Namespace(f"{self.__name__}.{namespace_name}")
-            self.namespaces[namespace_name] = namespace
-            setattr(self, namespace_name, namespace)
-
         for name in dir(cls):
             if name.startswith("_"):
                 continue
@@ -205,8 +236,7 @@ class Giso:
             if not callable(value):
                 continue
             operation = self._bind_class_callable(cls, value)
-            setattr(namespace, name, operation)
-            self.operations[f"{namespace_name}.{name}"] = operation
+            self._attach_operation(f"{namespace_name}.{name}", operation)
 
     def _bind_class_callable(self, cls: type, func: Callable[..., Any]) -> Callable[..., Any]:
         signature = inspect.signature(func)
@@ -226,17 +256,35 @@ class Giso:
         raw_name = func.__name__
         if "__" in raw_name:
             namespace_name, operation_name = raw_name.split("__", 1)
+            self._attach_operation(f"{namespace_name}.{operation_name}", func)
+            return
+        self._attach_operation(raw_name, func)
+
+    def _attach_operation(self, operation_name: str, func: Callable[..., Any]) -> None:
+        """Attach an operation and route calls through the result accumulator."""
+        wrapped = self._wrap_operation(operation_name, func)
+
+        if "." in operation_name:
+            namespace_name, name = operation_name.split(".", 1)
             namespace = self.namespaces.get(namespace_name)
             if namespace is None:
                 namespace = Namespace(f"{self.__name__}.{namespace_name}")
                 self.namespaces[namespace_name] = namespace
                 setattr(self, namespace_name, namespace)
-            setattr(namespace, operation_name, func)
-            self.operations[f"{namespace_name}.{operation_name}"] = func
-            return
+            setattr(namespace, name, wrapped)
+        else:
+            setattr(self, operation_name, wrapped)
 
-        setattr(self, raw_name, func)
-        self.operations[raw_name] = func
+        self.operations[operation_name] = wrapped
+
+    def _wrap_operation(self, operation_name: str, func: Callable[..., Any]) -> Callable[..., Any]:
+        @functools.wraps(func)
+        def operation(*args: Any, **kwargs: Any) -> Any:
+            value = func(*args, **kwargs)
+            return self.results.add(operation_name, value)
+
+        operation.__giso_original__ = func
+        return operation
 
     @staticmethod
     def _snake_case(name: str) -> str:
