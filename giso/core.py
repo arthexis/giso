@@ -5,6 +5,7 @@ import importlib.util
 import inspect
 import pathlib
 import re
+import shlex
 import sys
 from collections.abc import Iterator, MutableMapping
 from types import ModuleType
@@ -147,6 +148,67 @@ class Giso:
         derived = self._clone()
         derived.fold(source)
         return derived
+
+    def __lshift__(self, command: str) -> Any:
+        """Execute one of this Giso's operations and fold its transient result back into itself."""
+        operation_name, args, kwargs = self._parse_command(command)
+        operation = self.operations[operation_name]
+        original = getattr(operation, "__giso_original__", operation)
+        value = original(*args, **kwargs)
+        self.fold(value)
+        return value
+
+    def _parse_command(self, command: str) -> tuple[str, list[str], dict[str, Any]]:
+        """Parse a small Gway-like command against the operations already in this Giso."""
+        if not isinstance(command, str) or not command.strip():
+            raise TypeError("Self-fold expects a non-empty command string")
+
+        tokens = shlex.split(command)
+        operation_name = None
+        argument_start = 0
+
+        for end in range(len(tokens), 0, -1):
+            candidate = ".".join(tokens[:end])
+            if candidate in self.operations:
+                operation_name = candidate
+                argument_start = end
+                break
+
+        if operation_name is None:
+            raise KeyError(f"No Giso operation matches command: {command}")
+
+        args: list[str] = []
+        kwargs: dict[str, Any] = {}
+        remaining = tokens[argument_start:]
+        index = 0
+        while index < len(remaining):
+            token = remaining[index]
+            if not token.startswith("--"):
+                args.append(token)
+                index += 1
+                continue
+
+            if token.startswith("--no-"):
+                kwargs[token[5:].replace("-", "_")] = False
+                index += 1
+                continue
+
+            option = token[2:]
+            if "=" in option:
+                name, value = option.split("=", 1)
+                kwargs[name.replace("-", "_")] = value
+                index += 1
+                continue
+
+            name = option.replace("-", "_")
+            if index + 1 < len(remaining) and not remaining[index + 1].startswith("--"):
+                kwargs[name] = remaining[index + 1]
+                index += 2
+            else:
+                kwargs[name] = True
+                index += 1
+
+        return operation_name, args, kwargs
 
     def _clone(self) -> "Giso":
         """Clone this Giso's current capability and result state without sharing containers."""
