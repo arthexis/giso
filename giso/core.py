@@ -24,6 +24,12 @@ class Results(MutableMapping[str, Any]):
         self._history.append((operation, value))
         return value
 
+    def fold(self, other: "Results") -> "Results":
+        """Fold another result history into this one in call order."""
+        for operation, value in other.history:
+            self.add(operation, value)
+        return self
+
     @property
     def history(self) -> tuple[tuple[str, Any], ...]:
         """Return all recorded operation results in call order."""
@@ -137,19 +143,19 @@ class Giso:
         return self.fold(source)
 
     def __add__(self, source: Any) -> "Giso":
-        """Return a new Giso with this capability surface plus one folded source."""
+        """Return a new Giso with this capability and result state plus one folded source."""
         derived = self._clone()
         derived.fold(source)
         return derived
 
     def _clone(self) -> "Giso":
-        """Clone this Giso's current capability surface without sharing namespaces."""
+        """Clone this Giso's current capability and result state without sharing containers."""
         derived = type(self)(name=self.__name__)
         derived._fold_giso(self)
         return derived
 
     def _fold_giso(self, source: "Giso") -> None:
-        """Fold another Giso's current capability surface into this one."""
+        """Fold another Giso's current capabilities and accumulated results into this one."""
         if source is self:
             return
 
@@ -157,6 +163,7 @@ class Giso:
         for operation_name, operation in source.operations.items():
             original = getattr(operation, "__giso_original__", operation)
             self._attach_operation(operation_name, original)
+        self.results.fold(source.results)
 
     def __getitem__(self, key: Any) -> Any:
         """Resolve a value now, or return a lazy Sigil for the double-bracket form."""
