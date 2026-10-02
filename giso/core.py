@@ -29,6 +29,37 @@ class Namespace:
         return f"<Namespace {self.__name__}: {', '.join(names)}>"
 
 
+class Sigil:
+    """A lazy reference to a value or capability rooted in a Giso."""
+
+    def __init__(self, root: "Giso", path: str):
+        if not isinstance(path, str) or not path:
+            raise TypeError("Sigil path must be a non-empty string")
+        self.root = root
+        self.path = path
+
+    def resolve(self) -> Any:
+        """Resolve this sigil against the current state of its root Giso."""
+        return self.root[self.path]
+
+    @property
+    def value(self) -> Any:
+        """Resolve this sigil as a property."""
+        return self.resolve()
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        """Resolve the sigil and call the result when it is callable."""
+        value = self.resolve()
+        if args or kwargs:
+            if not callable(value):
+                raise TypeError(f"Sigil {self.path!r} does not resolve to a callable")
+            return value(*args, **kwargs)
+        return value
+
+    def __repr__(self) -> str:
+        return f"<Sigil {self.root.__name__}[{self.path!r}]>"
+
+
 class Giso:
     """A live object that can ingest Python modules, classes, and callables."""
 
@@ -52,6 +83,32 @@ class Giso:
             else:
                 raise TypeError(f"Unsupported source type: {type(source).__name__}")
         return self
+
+    def __getitem__(self, key: Any) -> Any:
+        """Resolve a value now, or return a lazy Sigil for the double-bracket form."""
+        if isinstance(key, list):
+            if len(key) != 1:
+                raise ValueError("Lazy sigil syntax expects exactly one path")
+            return Sigil(self, key[0])
+        if not isinstance(key, str) or not key:
+            raise TypeError("Giso lookup expects a non-empty string path")
+        return self._lookup(key)
+
+    def _lookup(self, path: str) -> Any:
+        """Walk a dotted path from this Giso using attributes or mapping items."""
+        value: Any = self
+        for part in path.split("."):
+            if isinstance(value, dict) and part in value:
+                value = value[part]
+                continue
+            try:
+                value = getattr(value, part)
+            except AttributeError as exc:
+                try:
+                    value = value[part]
+                except (KeyError, IndexError, TypeError, AttributeError) as item_exc:
+                    raise KeyError(path) from item_exc
+        return value
 
     def _flatten(self, values):
         for value in values:
