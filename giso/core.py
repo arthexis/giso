@@ -106,7 +106,7 @@ class Sigil:
 
 
 class Giso:
-    """A live object that can ingest Python modules, classes, and callables."""
+    """A live object that can fold Python modules, classes, and callables into itself."""
 
     def __init__(self, *sources: Any, name: str = "giso"):
         self.__name__ = name
@@ -115,15 +115,15 @@ class Giso:
         self.operations: dict[str, Callable[..., Any]] = {}
         self.results = Results()
         if sources:
-            self.ingest(*sources)
+            self.fold(*sources)
 
-    def ingest(self, *sources: Any) -> "Giso":
-        """Ingest supported Python sources and mutate this Giso in place."""
+    def fold(self, *sources: Any) -> "Giso":
+        """Fold supported Python sources into this Giso and mutate it in place."""
         for source in self._flatten(sources):
             if source is None:
                 continue
             if isinstance(source, (str, pathlib.Path)):
-                self._ingest_path(pathlib.Path(source))
+                self._fold_path(pathlib.Path(source))
             elif inspect.isclass(source) or callable(source) or isinstance(source, ModuleType):
                 self._attach_component(source)
             else:
@@ -131,13 +131,13 @@ class Giso:
         return self
 
     def __iadd__(self, source: Any) -> "Giso":
-        """Ingest a source into this Giso and return the same instance."""
-        return self.ingest(source)
+        """Fold a source into this Giso and return the same instance."""
+        return self.fold(source)
 
     def __add__(self, source: Any) -> "Giso":
-        """Return a new Giso with this capability surface plus one source."""
+        """Return a new Giso with this capability surface plus one folded source."""
         derived = self._clone()
-        derived.ingest(source)
+        derived.fold(source)
         return derived
 
     def _clone(self) -> "Giso":
@@ -184,7 +184,7 @@ class Giso:
             else:
                 yield value
 
-    def _ingest_path(self, path: pathlib.Path) -> None:
+    def _fold_path(self, path: pathlib.Path) -> None:
         path = path.expanduser().resolve()
         if path.is_dir():
             for item in sorted(path.rglob("*.py")):
@@ -195,10 +195,10 @@ class Giso:
         if path.is_file() and path.suffix == ".py":
             self._attach_module(path)
             return
-        raise ValueError(f"Cannot ingest path: {path}")
+        raise ValueError(f"Cannot fold path: {path}")
 
     def _attach_module(self, path: pathlib.Path) -> None:
-        module_name = f"giso_ingested_{path.stem}_{abs(hash(path))}"
+        module_name = f"giso_folded_{path.stem}_{abs(hash(path))}"
         spec = importlib.util.spec_from_file_location(module_name, path)
         if spec is None or spec.loader is None:
             raise ImportError(f"Cannot load module from {path}")
