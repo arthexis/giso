@@ -13,7 +13,7 @@ def beta():
     return "beta"
 
 
-def test_iadd_ingests_into_same_instance():
+def test_iadd_folds_into_same_instance():
     g = Giso()
     original_id = id(g)
 
