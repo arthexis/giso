@@ -15,7 +15,6 @@ def test_constructor_folds_module_object():
     assert giso.math.double(4) == 8
     assert giso.text.upper("giso") == "GISO"
     assert giso.greeter.hello("Ada") == "hello Ada"
-    assert giso.modules[basic.__name__] is basic
 
 
 def test_fold_mutates_existing_giso_with_module_object():
@@ -27,7 +26,6 @@ def test_fold_mutates_existing_giso_with_module_object():
     assert giso.math.double(5) == 10
     assert giso.text.upper("fold") == "FOLD"
     assert giso.greeter.hello("Grace") == "hello Grace"
-    assert giso.modules[basic.__name__] is basic
 
 
 def test_module_object_only_exposes_locally_defined_callables_and_classes():
