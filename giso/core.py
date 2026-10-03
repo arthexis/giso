@@ -265,6 +265,9 @@ class Giso:
 
     def _fold_string(self, source: str) -> None:
         """Fold a string as an existing path first, otherwise as an importable module name."""
+        if not source.strip():
+            raise ValueError("Cannot fold an empty module name")
+
         path = pathlib.Path(source).expanduser()
         if path.exists():
             self._fold_path(path)
