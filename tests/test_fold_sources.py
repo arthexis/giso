@@ -9,6 +9,12 @@ from giso import Giso
 from tests.ingredients import basic
 
 
+def write_python(path: Path, source: str) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(source, encoding="utf-8")
+    return path
+
+
 def collection__callable(value: str) -> str:
     return f"callable:{value}"
 
@@ -50,33 +56,23 @@ def test_module_object_only_exposes_locally_defined_callables_and_classes():
     assert "text.upper" in giso.operations
     assert "greeter.hello" in giso.operations
     assert "kitchen.make_extra" in giso.operations
-
-    # Giso is imported by the ingredient module, not defined there, so folding
-    # the module must not expose it as a capability.
     assert "giso" not in giso.operations
     assert not hasattr(giso, "giso")
 
 
 def test_directory_fold_recursively_loads_public_python_files(tmp_path: Path):
     ingredients = tmp_path / "ingredients"
-    nested = ingredients / "nested"
-    nested.mkdir(parents=True)
-
-    (ingredients / "math_tools.py").write_text(
-        "def math__triple(value: int) -> int:\n"
-        "    return value * 3\n",
-        encoding="utf-8",
+    write_python(
+        ingredients / "math_tools.py",
+        "def math__triple(value: int) -> int:\n    return value * 3\n",
     )
-    (ingredients / "text_tools.py").write_text(
-        "def text__lower(value: str) -> str:\n"
-        "    return value.lower()\n",
-        encoding="utf-8",
+    write_python(
+        ingredients / "text_tools.py",
+        "def text__lower(value: str) -> str:\n    return value.lower()\n",
     )
-    (nested / "diagram.py").write_text(
-        "class DiagramTool:\n"
-        "    def validate(self, value: str) -> str:\n"
-        "        return f'valid:{value}'\n",
-        encoding="utf-8",
+    write_python(
+        ingredients / "nested" / "diagram.py",
+        "class DiagramTool:\n    def validate(self, value: str) -> str:\n        return f'valid:{value}'\n",
     )
 
     giso = Giso(ingredients)
@@ -89,32 +85,24 @@ def test_directory_fold_recursively_loads_public_python_files(tmp_path: Path):
 
 def test_directory_fold_skips_underscore_python_files_and_non_python_files(tmp_path: Path):
     ingredients = tmp_path / "ingredients"
-    nested = ingredients / "nested"
-    nested.mkdir(parents=True)
-
-    (ingredients / "public.py").write_text(
-        "def public__value() -> str:\n"
-        "    return 'public'\n",
-        encoding="utf-8",
+    write_python(
+        ingredients / "public.py",
+        "def public__value() -> str:\n    return 'public'\n",
     )
-    (ingredients / "__init__.py").write_text(
-        "def package__value() -> str:\n"
-        "    return 'package'\n",
-        encoding="utf-8",
+    write_python(
+        ingredients / "__init__.py",
+        "def package__value() -> str:\n    return 'package'\n",
     )
-    (ingredients / "_private.py").write_text(
-        "def private__value() -> str:\n"
-        "    return 'private'\n",
-        encoding="utf-8",
+    write_python(
+        ingredients / "_private.py",
+        "def private__value() -> str:\n    return 'private'\n",
     )
-    (nested / "_hidden.py").write_text(
-        "def hidden__value() -> str:\n"
-        "    return 'hidden'\n",
-        encoding="utf-8",
+    write_python(
+        ingredients / "nested" / "_hidden.py",
+        "def hidden__value() -> str:\n    return 'hidden'\n",
     )
     (ingredients / "notes.txt").write_text(
-        "def text_file__value():\n"
-        "    return 'not python'\n",
+        "def text_file__value():\n    return 'not python'\n",
         encoding="utf-8",
     )
 
@@ -132,11 +120,9 @@ def test_directory_fold_skips_underscore_python_files_and_non_python_files(tmp_p
 
 
 def test_constructor_folds_existing_python_file_from_string_path(tmp_path: Path):
-    ingredient = tmp_path / "ingredient.py"
-    ingredient.write_text(
-        "def spice__add(value: str) -> str:\n"
-        "    return value + '-pepper'\n",
-        encoding="utf-8",
+    ingredient = write_python(
+        tmp_path / "ingredient.py",
+        "def spice__add(value: str) -> str:\n    return value + '-pepper'\n",
     )
 
     giso = Giso(str(ingredient))
@@ -147,16 +133,13 @@ def test_constructor_folds_existing_python_file_from_string_path(tmp_path: Path)
 
 def test_fold_accepts_existing_directory_from_string_path(tmp_path: Path):
     ingredients = tmp_path / "ingredients"
-    ingredients.mkdir()
-    (ingredients / "one.py").write_text(
-        "def one__value() -> int:\n"
-        "    return 1\n",
-        encoding="utf-8",
+    write_python(
+        ingredients / "one.py",
+        "def one__value() -> int:\n    return 1\n",
     )
-    (ingredients / "two.py").write_text(
-        "def two__value() -> int:\n"
-        "    return 2\n",
-        encoding="utf-8",
+    write_python(
+        ingredients / "two.py",
+        "def two__value() -> int:\n    return 2\n",
     )
 
     giso = Giso()
@@ -169,19 +152,14 @@ def test_fold_accepts_existing_directory_from_string_path(tmp_path: Path):
 
 
 def test_existing_string_path_takes_precedence_over_module_import(tmp_path: Path, monkeypatch):
-    ingredient = tmp_path / "collision.py"
-    ingredient.write_text(
-        "def source__kind() -> str:\n"
-        "    return 'path'\n",
-        encoding="utf-8",
+    ingredient = write_python(
+        tmp_path / "collision.py",
+        "def source__kind() -> str:\n    return 'path'\n",
     )
-
     import_root = tmp_path / "imports"
-    import_root.mkdir()
-    (import_root / "collision.py").write_text(
-        "def source__kind() -> str:\n"
-        "    return 'module'\n",
-        encoding="utf-8",
+    write_python(
+        import_root / "collision.py",
+        "def source__kind() -> str:\n    return 'module'\n",
     )
     monkeypatch.syspath_prepend(str(import_root))
     monkeypatch.chdir(tmp_path)
@@ -204,12 +182,10 @@ def test_module_string_variants_resolve_same_importable_module(
     source: str, tmp_path: Path, monkeypatch
 ):
     package = tmp_path / "pantry"
-    package.mkdir()
-    (package / "__init__.py").write_text("", encoding="utf-8")
-    (package / "herbs.py").write_text(
-        "def herbs__add(value: str) -> str:\n"
-        "    return value + '-oregano'\n",
-        encoding="utf-8",
+    write_python(package / "__init__.py", "")
+    write_python(
+        package / "herbs.py",
+        "def herbs__add(value: str) -> str:\n    return value + '-oregano'\n",
     )
 
     elsewhere = tmp_path / "elsewhere"
@@ -224,11 +200,9 @@ def test_module_string_variants_resolve_same_importable_module(
 
 
 def test_nested_collections_fold_all_supported_source_shapes(tmp_path: Path):
-    ingredient = tmp_path / "ingredient.py"
-    ingredient.write_text(
-        "def path__value(value: str) -> str:\n"
-        "    return f'path:{value}'\n",
-        encoding="utf-8",
+    ingredient = write_python(
+        tmp_path / "ingredient.py",
+        "def path__value(value: str) -> str:\n    return f'path:{value}'\n",
     )
     other = Giso(nested__giso)
 
