@@ -8,7 +8,7 @@ import pathlib
 import re
 import shlex
 import sys
-from collections.abc import Iterator, Mapping, MutableMapping
+from collections.abc import Iterable, Iterator, Mapping, MutableMapping, Sized
 from types import ModuleType
 from typing import Any, Callable
 
@@ -63,11 +63,68 @@ class Results(MutableMapping[str, Any]):
         return repr(self._latest)
 
 
+class CapabilityRequest:
+    """Describe a capability path requested from a deferred source."""
+
+    def __init__(self, path: str):
+        self.path = path
+
+    def __repr__(self) -> str:
+        return f"<CapabilityRequest {self.path!r}>"
+
+
+class _DeferredSource:
+    """Advance one iterator at most once for each unresolved lookup."""
+
+    def __init__(self, iterator: Iterator[Any]):
+        self.iterator = iterator
+        self.primed = False
+        self.exhausted = False
+
+    def request(self, path: str) -> Any:
+        if self.exhausted:
+            return None
+
+        sender = getattr(self.iterator, "send", None)
+        if sender is None:
+            return self._next()
+
+        if not self.primed:
+            initial = self._next()
+            self.primed = True
+            if self.exhausted or initial is not None:
+                return initial
+
+        try:
+            return sender(CapabilityRequest(path))
+        except StopIteration:
+            self.exhausted = True
+            return None
+
+    def _next(self) -> Any:
+        try:
+            return next(self.iterator)
+        except StopIteration:
+            self.exhausted = True
+            return None
+
+
 class Namespace:
     """A mutable namespace of capabilities attached to a Giso."""
 
-    def __init__(self, name: str):
+    def __init__(self, name: str, root: "Giso | None" = None, path: str | None = None):
         self.__name__ = name
+        self._root = root
+        self._path = path
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("_") or self._root is None or self._path is None:
+            raise AttributeError(name)
+        path = f"{self._path}.{name}"
+        try:
+            return self._root._lookup(path)
+        except KeyError as exc:
+            raise AttributeError(name) from exc
 
     def __iter__(self):
         for name in sorted(vars(self)):
@@ -122,8 +179,17 @@ class Giso:
         self.namespaces: dict[str, Namespace] = {}
         self.operations: dict[str, Callable[..., Any]] = {}
         self.results = Results()
+        self._deferred_sources: list[_DeferredSource] = []
         if sources:
             self.fold(*sources)
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("_") or not self.__dict__.get("_deferred_sources"):
+            raise AttributeError(name)
+        try:
+            return self._lookup(name)
+        except KeyError as exc:
+            raise AttributeError(name) from exc
 
     def fold(self, *sources: Any) -> "Giso":
         """Fold supported sources into this Giso and mutate it in place."""
@@ -140,6 +206,10 @@ class Giso:
                 self._fold_string(source)
             elif inspect.isclass(source) or callable(source) or isinstance(source, ModuleType):
                 self._attach_component(source)
+            elif isinstance(source, Iterator):
+                self._deferred_sources.append(_DeferredSource(source))
+            elif isinstance(source, Sized) and isinstance(source, Iterable):
+                self._fold_finite_iterable(source)
             elif self._is_foldable_instance(source):
                 self._attach_instance(source)
             else:
@@ -218,7 +288,7 @@ class Giso:
         return operation_name, args, kwargs
 
     def _clone(self) -> "Giso":
-        """Clone this Giso's current capability and result state without sharing containers."""
+        """Clone current capabilities/results; deferred live sources are not cloned."""
         derived = type(self)(name=self.__name__)
         derived._fold_giso(self)
         return derived
@@ -258,6 +328,11 @@ class Giso:
             for child_name, result in folded.results.history:
                 self.results.add(f"{operation_name}.{child_name}", result)
 
+    def _fold_finite_iterable(self, source: Iterable[Any]) -> None:
+        """Eagerly fold every item from an iterable that advertises a finite size."""
+        for value in source:
+            self.fold(value)
+
     def __getitem__(self, key: Any) -> Any:
         """Resolve a value now, or return a lazy Sigil for the double-bracket form."""
         if isinstance(key, list):
@@ -269,14 +344,36 @@ class Giso:
         return self._lookup(key)
 
     def _lookup(self, path: str) -> Any:
-        """Walk a dotted path from this Giso using attributes or mapping items."""
+        """Resolve a path, asking each deferred source at most once on a miss."""
+        try:
+            return self._lookup_current(path)
+        except KeyError:
+            pass
+
+        for source in tuple(self._deferred_sources):
+            ingredient = source.request(path)
+            if source.exhausted:
+                self._deferred_sources.remove(source)
+            if ingredient is not None:
+                self.fold(ingredient)
+            try:
+                return self._lookup_current(path)
+            except KeyError:
+                continue
+        raise KeyError(path)
+
+    def _lookup_current(self, path: str) -> Any:
+        """Walk a dotted path without consulting deferred sources."""
         value: Any = self
         for part in path.split("."):
             if isinstance(value, dict) and part in value:
                 value = value[part]
                 continue
             try:
-                value = getattr(value, part)
+                if value is self:
+                    value = object.__getattribute__(self, part)
+                else:
+                    value = object.__getattribute__(value, part)
             except AttributeError:
                 try:
                     value = value[part]
@@ -427,13 +524,18 @@ class Giso:
                 if container is self:
                     namespace = self.namespaces.get(part)
                     if namespace is None:
-                        namespace = Namespace(f"{self.__name__}.{part}")
+                        namespace = Namespace(
+                            f"{self.__name__}.{part}", root=self, path=part
+                        )
                         self.namespaces[part] = namespace
                         setattr(self, part, namespace)
                 else:
                     namespace = getattr(container, part, None)
                     if not isinstance(namespace, Namespace):
-                        namespace = Namespace(f"{self.__name__}.{'.'.join(path_parts)}")
+                        path = ".".join(path_parts)
+                        namespace = Namespace(
+                            f"{self.__name__}.{path}", root=self, path=path
+                        )
                         setattr(container, part, namespace)
                 container = namespace
             setattr(container, parts[-1], wrapped)
