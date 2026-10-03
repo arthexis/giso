@@ -114,7 +114,7 @@ class Sigil:
 
 
 class Giso:
-    """A live object that can fold Python modules, classes, callables, and other Gisos into itself."""
+    """A live object that can fold Python software and other Gisos into itself."""
 
     def __init__(self, *sources: Any, name: str = "giso"):
         self.__name__ = name
@@ -138,6 +138,8 @@ class Giso:
                 self._fold_string(source)
             elif inspect.isclass(source) or callable(source) or isinstance(source, ModuleType):
                 self._attach_component(source)
+            elif self._is_foldable_instance(source):
+                self._attach_instance(source)
             else:
                 raise TypeError(f"Unsupported source type: {type(source).__name__}")
         return self
@@ -329,6 +331,27 @@ class Giso:
                     self._attach_callable(value)
             return
         raise TypeError(f"Unsupported component type: {type(component).__name__}")
+
+    @staticmethod
+    def _is_foldable_instance(instance: Any) -> bool:
+        """Return whether an object instance is an intentional non-built-in fold source."""
+        return type(instance).__module__ != "builtins"
+
+    def _attach_instance(self, instance: Any) -> None:
+        """Attach public class-defined methods bound to one configured instance."""
+        namespace_name = self._snake_case(type(instance).__name__)
+        for name in dir(type(instance)):
+            if name.startswith("_"):
+                continue
+            descriptor = inspect.getattr_static(type(instance), name)
+            if not (
+                inspect.isfunction(descriptor)
+                or isinstance(descriptor, (staticmethod, classmethod))
+            ):
+                continue
+            method = getattr(instance, name)
+            if callable(method):
+                self._attach_operation(f"{namespace_name}.{name}", method)
 
     def _attach_class(self, cls: type) -> None:
         namespace_name = self._snake_case(cls.__name__)
