@@ -8,7 +8,7 @@ import pathlib
 import re
 import shlex
 import sys
-from collections.abc import Iterator, MutableMapping
+from collections.abc import Iterator, Mapping, MutableMapping
 from types import ModuleType
 from typing import Any, Callable
 
@@ -132,6 +132,8 @@ class Giso:
                 continue
             if isinstance(source, Giso):
                 self._fold_giso(source)
+            elif isinstance(source, Mapping):
+                self._fold_mapping(source)
             elif isinstance(source, pathlib.Path):
                 self._fold_path(source)
             elif isinstance(source, str):
@@ -231,6 +233,30 @@ class Giso:
             original = getattr(operation, "__giso_original__", operation)
             self._attach_operation(operation_name, original)
         self.results.fold(source.results)
+
+    def _fold_mapping(self, source: Mapping[Any, Any], prefix: str = "") -> None:
+        """Fold a mapping as a declarative capability tree."""
+        for key, value in source.items():
+            if not isinstance(key, str) or not key.isidentifier() or key.startswith("_"):
+                raise ValueError("Mapping keys must be public Python identifiers")
+
+            operation_name = f"{prefix}.{key}" if prefix else key
+            if isinstance(value, Mapping):
+                self._fold_mapping(value, operation_name)
+                continue
+            if value is None:
+                continue
+            if callable(value) and not inspect.isclass(value) and not isinstance(value, ModuleType):
+                self._attach_operation(operation_name, value)
+                continue
+
+            folded = type(self)(value, name=self.__name__)
+            self.modules.update(folded.modules)
+            for child_name, operation in folded.operations.items():
+                original = getattr(operation, "__giso_original__", operation)
+                self._attach_operation(f"{operation_name}.{child_name}", original)
+            for child_name, result in folded.results.history:
+                self.results.add(f"{operation_name}.{child_name}", result)
 
     def __getitem__(self, key: Any) -> Any:
         """Resolve a value now, or return a lazy Sigil for the double-bracket form."""
@@ -389,17 +415,28 @@ class Giso:
     def _attach_operation(self, operation_name: str, func: Callable[..., Any]) -> None:
         """Attach an operation and route calls through the result accumulator."""
         wrapped = self._wrap_operation(operation_name, func)
+        parts = operation_name.split(".")
 
-        if "." in operation_name:
-            namespace_name, name = operation_name.split(".", 1)
-            namespace = self.namespaces.get(namespace_name)
-            if namespace is None:
-                namespace = Namespace(f"{self.__name__}.{namespace_name}")
-                self.namespaces[namespace_name] = namespace
-                setattr(self, namespace_name, namespace)
-            setattr(namespace, name, wrapped)
-        else:
+        if len(parts) == 1:
             setattr(self, operation_name, wrapped)
+        else:
+            container: Any = self
+            path_parts: list[str] = []
+            for part in parts[:-1]:
+                path_parts.append(part)
+                if container is self:
+                    namespace = self.namespaces.get(part)
+                    if namespace is None:
+                        namespace = Namespace(f"{self.__name__}.{part}")
+                        self.namespaces[part] = namespace
+                        setattr(self, part, namespace)
+                else:
+                    namespace = getattr(container, part, None)
+                    if not isinstance(namespace, Namespace):
+                        namespace = Namespace(f"{self.__name__}.{'.'.join(path_parts)}")
+                        setattr(container, part, namespace)
+                container = namespace
+            setattr(container, parts[-1], wrapped)
 
         self.operations[operation_name] = wrapped
 
