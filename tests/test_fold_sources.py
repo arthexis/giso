@@ -114,3 +114,64 @@ def test_directory_fold_skips_underscore_python_files_and_non_python_files(tmp_p
     assert "hidden.value" not in giso.operations
     assert "text_file.value" not in giso.operations
     assert len(giso.modules) == 1
+
+
+def test_constructor_folds_existing_python_file_from_string_path(tmp_path: Path):
+    ingredient = tmp_path / "ingredient.py"
+    ingredient.write_text(
+        "def spice__add(value: str) -> str:\n"
+        "    return value + '-pepper'\n",
+        encoding="utf-8",
+    )
+
+    giso = Giso(str(ingredient))
+
+    assert giso.spice.add("stew") == "stew-pepper"
+    assert str(ingredient.resolve()) in giso.modules
+
+
+def test_fold_accepts_existing_directory_from_string_path(tmp_path: Path):
+    ingredients = tmp_path / "ingredients"
+    ingredients.mkdir()
+    (ingredients / "one.py").write_text(
+        "def one__value() -> int:\n"
+        "    return 1\n",
+        encoding="utf-8",
+    )
+    (ingredients / "two.py").write_text(
+        "def two__value() -> int:\n"
+        "    return 2\n",
+        encoding="utf-8",
+    )
+
+    giso = Giso()
+    returned = giso.fold(str(ingredients))
+
+    assert returned is giso
+    assert giso.one.value() == 1
+    assert giso.two.value() == 2
+    assert len(giso.modules) == 2
+
+
+def test_existing_string_path_takes_precedence_over_module_import(tmp_path: Path, monkeypatch):
+    ingredient = tmp_path / "collision.py"
+    ingredient.write_text(
+        "def source__kind() -> str:\n"
+        "    return 'path'\n",
+        encoding="utf-8",
+    )
+
+    import_root = tmp_path / "imports"
+    import_root.mkdir()
+    (import_root / "collision.py").write_text(
+        "def source__kind() -> str:\n"
+        "    return 'module'\n",
+        encoding="utf-8",
+    )
+    monkeypatch.syspath_prepend(str(import_root))
+    monkeypatch.chdir(tmp_path)
+
+    giso = Giso("collision.py")
+
+    assert giso.source.kind() == "path"
+    assert str(ingredient.resolve()) in giso.modules
