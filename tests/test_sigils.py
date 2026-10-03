@@ -21,7 +21,7 @@ def test_double_brackets_return_lazy_sigil():
     assert sigil.root is giso
     assert sigil.path == "math.double"
 
-    giso.ingest(math__double)
+    giso.fold(math__double)
 
     assert sigil.value(5) == 10
 
