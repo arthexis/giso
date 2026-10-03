@@ -1,8 +1,8 @@
 # Giso
 
-Giso is an experiment in building a live Python object by ingestion.
+Giso is an experiment in building a live Python object by folding software into it.
 
-A `Giso` starts almost empty. Give it Python functions, classes, modules, files, or directories and it mutates in place to expose the capabilities it discovers.
+A `Giso` starts almost empty. Fold in Python functions, classes, modules, files, or directories and it mutates in place to expose the capabilities it discovers.
 
 ```python
 from giso import Giso
@@ -18,19 +18,19 @@ class DiagramTool:
 
 
 g = Giso()
-g.ingest(math__double, DiagramTool)
+g.fold(math__double, DiagramTool)
 
 assert g.math.double(4) == 8
 assert g.diagram_tool.validate("drawing.svg") == "valid:drawing.svg"
 ```
 
-The double underscore in a function name creates a namespace: `math__double` becomes `g.math.double`. Public methods on an ingested class become operations under a snake-case namespace derived from the class name.
+The double underscore in a function name creates a namespace: `math__double` becomes `g.math.double`. Public methods on a folded class become operations under a snake-case namespace derived from the class name.
 
-The current experiment intentionally has no third-party runtime dependencies and no CLI, MCP, web server, recipes, security model, remote execution, deployment machinery, or application-specific integrations. The only goal is to preserve and explore the original GSoL idea: an object that can ingest software and gain capabilities while it is running.
+The current experiment intentionally has no third-party runtime dependencies and no CLI, MCP, web server, recipes, security model, remote execution, deployment machinery, or application-specific integrations. The only goal is to preserve and explore the original GSoL idea: an object that can fold software into itself and gain capabilities while it is running.
 
-## Supported ingestion
+## Supported folding
 
-`Giso.ingest(...)` currently accepts:
+`Giso.fold(...)` currently accepts:
 
 - Python callables
 - Python classes
@@ -39,6 +39,6 @@ The current experiment intentionally has no third-party runtime dependencies and
 - directories containing Python files
 - nested lists/tuples/sets of the above
 
-Imported callables from an ingested module are ignored; only functions and classes defined by that module are attached.
+Imported callables from a folded module are ignored; only functions and classes defined by that module are attached.
 
-`ingest()` mutates the existing object and returns the same `Giso`, so notebook-style incremental construction works naturally.
+`fold()` mutates the existing object and returns the same `Giso`, so notebook-style incremental construction works naturally.
