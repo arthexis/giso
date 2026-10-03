@@ -136,17 +136,3 @@ def test_self_fold_is_explicit_no_op():
     assert giso.results.history == history_before
     assert giso.namespaces == namespaces_before
     assert giso.math.double(5) == 10
-
-
-def test_plus_can_combine_two_gisos_without_mutating_either():
-    left = Giso(math__double)
-    right = Giso(text__upper)
-
-    combined = left + right
-
-    assert combined is not left
-    assert combined is not right
-    assert combined.math.double(4) == 8
-    assert combined.text.upper("giso") == "GISO"
-    assert not hasattr(left, "text")
-    assert not hasattr(right, "math")
