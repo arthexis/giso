@@ -9,6 +9,19 @@ from giso import Giso
 from tests.ingredients import basic
 
 
+def collection__callable(value: str) -> str:
+    return f"callable:{value}"
+
+
+class CollectionTool:
+    def use(self, value: str) -> str:
+        return f"class:{value}"
+
+
+def nested__giso(value: str) -> str:
+    return f"giso:{value}"
+
+
 def test_constructor_folds_module_object():
     assert isinstance(basic, ModuleType)
 
@@ -208,3 +221,48 @@ def test_module_string_variants_resolve_same_importable_module(
 
     assert giso.herbs.add("stew") == "stew-oregano"
     assert "pantry.herbs" in giso.modules
+
+
+def test_nested_collections_fold_all_supported_source_shapes(tmp_path: Path):
+    ingredient = tmp_path / "ingredient.py"
+    ingredient.write_text(
+        "def path__value(value: str) -> str:\n"
+        "    return f'path:{value}'\n",
+        encoding="utf-8",
+    )
+    other = Giso(nested__giso)
+
+    sources = [
+        collection__callable,
+        (
+            CollectionTool,
+            [
+                basic,
+                {
+                    ingredient,
+                    other,
+                },
+            ],
+        ),
+    ]
+
+    giso = Giso(sources)
+
+    assert giso.collection.callable("x") == "callable:x"
+    assert giso.collection_tool.use("x") == "class:x"
+    assert giso.math.double(3) == 6
+    assert giso.path.value("x") == "path:x"
+    assert giso.nested.giso("x") == "giso:x"
+
+
+def test_nested_collections_ignore_none_at_any_depth():
+    giso = Giso(
+        [
+            None,
+            (collection__callable, [None, {None, CollectionTool}]),
+            None,
+        ]
+    )
+
+    assert giso.collection.callable("x") == "callable:x"
+    assert giso.collection_tool.use("x") == "class:x"
