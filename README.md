@@ -2,7 +2,7 @@
 
 Giso is an experiment in building a live Python object by folding software into it.
 
-A `Giso` starts almost empty. Fold in Python functions, classes, modules, files, or directories and it mutates in place to expose the capabilities it discovers.
+A `Giso` starts almost empty. Fold in Python functions, classes, object instances, modules, files, or directories and it mutates in place to expose the capabilities it discovers.
 
 ```python
 from giso import Giso
@@ -26,6 +26,28 @@ assert g.diagram_tool.validate("drawing.svg") == "valid:drawing.svg"
 
 The double underscore in a function name creates a namespace: `math__double` becomes `g.math.double`. Public methods on a folded class become operations under a snake-case namespace derived from the class name.
 
+Configured object instances can also be folded. Their public class-defined methods are attached under the same class-derived namespace, but calls remain bound to the original instance so its state is preserved:
+
+```python
+class Counter:
+    def __init__(self, value: int = 0):
+        self.value = value
+
+    def increment(self) -> int:
+        self.value += 1
+        return self.value
+
+
+counter = Counter(4)
+g = Giso(counter)
+
+assert g.counter.increment() == 5
+assert g.counter.increment() == 6
+assert counter.value == 6
+```
+
+Private methods, plain attributes, and properties on folded instances are not exposed as operations.
+
 The current experiment intentionally has no third-party runtime dependencies and no CLI, MCP, web server, recipes, security model, remote execution, deployment machinery, or application-specific integrations. The only goal is to preserve and explore the original GSoL idea: an object that can fold software into itself and gain capabilities while it is running.
 
 ## Supported folding
@@ -34,11 +56,14 @@ The current experiment intentionally has no third-party runtime dependencies and
 
 - Python callables
 - Python classes
+- configured Python object instances
 - imported Python modules
 - `.py` files
 - directories containing Python files
 - nested lists/tuples/sets of the above
 
 Imported callables from a folded module are ignored; only functions and classes defined by that module are attached.
+
+Object instances expose public methods defined by their class while preserving the original bound instance and its state. Built-in values remain unsupported fold sources.
 
 `fold()` mutates the existing object and returns the same `Giso`, so notebook-style incremental construction works naturally.
