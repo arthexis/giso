@@ -15,6 +15,10 @@ def text__upper(value: str) -> str:
     return value.upper()
 
 
+def text__suffix(value: str, suffix: str = "!") -> str:
+    return value + suffix
+
+
 class DiagramTool:
     def validate(self, value: str) -> str:
         return f"valid:{value}"
@@ -125,16 +129,77 @@ def test_fold_accepts_another_giso():
     assert ingredient.text.upper("soup") == "SOUP"
 
 
-def test_folding_giso_keeps_results_independent():
+def test_folding_giso_copies_multiple_namespaces():
+    ingredient = Giso(math__double, text__upper, DiagramTool)
+    target = Giso(plain)
+
+    target.fold(ingredient)
+
+    assert target.plain(3) == 4
+    assert target.math.double(4) == 8
+    assert target.text.upper("giso") == "GISO"
+    assert target.diagram_tool.validate("shape") == "valid:shape"
+    assert set(target.operations) >= {
+        "plain",
+        "math.double",
+        "text.upper",
+        "diagram_tool.validate",
+    }
+
+
+def test_folding_giso_copies_result_history_in_order():
+    ingredient = Giso(math__double, text__upper, text__suffix)
+    ingredient.math.double(3)
+    ingredient.text.upper("fold")
+    ingredient.text.suffix("giso", "?")
+
+    target = Giso(plain)
+    target.plain(9)
+    target.fold(ingredient)
+
+    assert target.results.history == (
+        ("plain", 10),
+        ("math.double", 6),
+        ("text.upper", "FOLD"),
+        ("text.suffix", "giso?"),
+    )
+
+
+def test_folding_giso_keeps_results_independent_after_fold():
     ingredient = Giso(text__upper)
+    ingredient.text.upper("before")
     target = Giso(ingredient)
 
     assert target.text is not ingredient.text
+    assert target.results.history == (("text.upper", "BEFORE"),)
 
-    target.text.upper("stew")
+    target.text.upper("target")
+    ingredient.text.upper("ingredient")
 
-    assert target.results["text.upper"] == "STEW"
-    assert len(ingredient.results) == 0
+    assert target.results.history == (
+        ("text.upper", "BEFORE"),
+        ("text.upper", "TARGET"),
+    )
+    assert ingredient.results.history == (
+        ("text.upper", "BEFORE"),
+        ("text.upper", "INGREDIENT"),
+    )
+
+
+def test_self_fold_is_explicit_no_op():
+    giso = Giso(math__double, text__upper)
+    giso.math.double(2)
+    operations_before = tuple(giso.operations)
+    history_before = giso.results.history
+    namespaces_before = dict(giso.namespaces)
+
+    returned = giso.fold(giso)
+
+    assert returned is giso
+    assert tuple(giso.operations) == operations_before
+    assert giso.results.history == history_before
+    assert giso.namespaces == namespaces_before
+    assert giso.math.double(5) == 10
 
 
 def test_plus_can_combine_two_gisos_without_mutating_either():
