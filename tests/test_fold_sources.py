@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from types import ModuleType
 
+import pytest
+
 from giso import Giso
 from tests.ingredients import basic
 
@@ -175,3 +177,34 @@ def test_existing_string_path_takes_precedence_over_module_import(tmp_path: Path
 
     assert giso.source.kind() == "path"
     assert str(ingredient.resolve()) in giso.modules
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "pantry.herbs",
+        "pantry/herbs",
+        "pantry/herbs.py",
+    ],
+)
+def test_module_string_variants_resolve_same_importable_module(
+    source: str, tmp_path: Path, monkeypatch
+):
+    package = tmp_path / "pantry"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "herbs.py").write_text(
+        "def herbs__add(value: str) -> str:\n"
+        "    return value + '-oregano'\n",
+        encoding="utf-8",
+    )
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.chdir(elsewhere)
+
+    giso = Giso(source)
+
+    assert giso.herbs.add("stew") == "stew-oregano"
+    assert "pantry.herbs" in giso.modules
