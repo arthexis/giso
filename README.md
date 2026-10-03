@@ -26,9 +26,47 @@ assert g.diagram_tool.validate("drawing.svg") == "valid:drawing.svg"
 
 The double underscore in a function name creates a namespace: `math__double` becomes `g.math.double`. Public methods on a folded class become operations under a snake-case namespace derived from the class name.
 
-Configured object instances can also be folded. Their public class-defined methods are attached under the same class-derived namespace, but calls remain bound to the original instance so its state is preserved.
+Configured object instances can also be folded. Their public class-defined methods are attached under the same class-derived namespace, but calls remain bound to the original instance so its state is preserved:
 
-Mappings provide a declarative way to define capability trees. Mapping keys define the exported path, nested mappings create nested namespaces, and callable leaves use their mapping key as the operation name.
+```python
+class Counter:
+    def __init__(self, value: int = 0):
+        self.value = value
+
+    def increment(self) -> int:
+        self.value += 1
+        return self.value
+
+
+counter = Counter(4)
+g = Giso(counter)
+
+assert g.counter.increment() == 5
+assert g.counter.increment() == 6
+assert counter.value == 6
+```
+
+Private methods, plain attributes, and properties on folded instances are not exposed as operations.
+
+Mappings provide a declarative way to define capability trees. Mapping keys define the exported path, so the callable's Python name does not have to match the Giso operation name:
+
+```python
+def twice(value: int) -> int:
+    return value * 2
+
+
+g = Giso({
+    "tools": {
+        "math": {
+            "double": twice,
+        },
+    },
+})
+
+assert g.tools.math.double(4) == 8
+```
+
+Nested mappings create nested namespaces. Callable leaves use their mapping key as the operation name. Other supported fold sources keep their discovered capability surface under the mapping key as a prefix. Mapping keys must be public Python identifiers.
 
 Finite-looking iterables that implement both `Iterable` and `Sized` are consumed eagerly and each item is folded through the normal source rules. Iterators and generators are different: they are retained as private live sources and are not consumed during `fold()`.
 
