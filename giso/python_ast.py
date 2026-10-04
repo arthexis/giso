@@ -12,16 +12,15 @@ class Giso(ConstructionGiso):
     """A Giso that can fold native Python AST objects."""
 
     def fold(self, *sources: Any) -> "Giso":
-        remaining: list[Any] = []
-        for source in sources:
+        for source in self._flatten(sources):
+            if source is None:
+                continue
             if isinstance(source, ast.Module):
                 self._fold_ast_module(source)
             elif isinstance(source, ast.Expression):
                 self._fold_ast_expression(source)
             else:
-                remaining.append(source)
-        if remaining:
-            super().fold(*remaining)
+                super().fold(source)
         return self
 
     def _fold_ast_module(self, tree: ast.Module) -> None:
