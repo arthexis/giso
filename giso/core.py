@@ -8,7 +8,12 @@ import pathlib
 import pkgutil
 import re
 import shlex
+import shutil
+import stat
 import sys
+import tarfile
+import tempfile
+import zipfile
 from collections.abc import Iterable, Iterator, Mapping, MutableMapping, Sized
 from types import ModuleType
 from typing import Any, Callable
@@ -170,6 +175,7 @@ class Giso:
         self.operations: dict[str, Callable[..., Any]] = {}
         self.results = Results()
         self._deferred_sources: list[_DeferredSource] = []
+        self._archive_roots: list[tempfile.TemporaryDirectory[str]] = []
         if sources:
             self.fold(*sources)
 
@@ -275,6 +281,9 @@ class Giso:
         if source is self:
             return
         self.modules.update(source.modules)
+        for root in source._archive_roots:
+            if root not in self._archive_roots:
+                self._archive_roots.append(root)
         for operation_name, operation in source.operations.items():
             original = getattr(operation, "__giso_original__", operation)
             self._attach_operation(operation_name, original)
@@ -410,10 +419,112 @@ class Giso:
                     continue
                 self._attach_module(item)
             return
+        if path.is_file() and self._is_archive_path(path):
+            self._fold_archive(path)
+            return
         if path.is_file() and path.suffix == ".py":
             self._attach_module(path)
             return
         raise ValueError(f"Cannot fold path: {path}")
+
+    @staticmethod
+    def _is_archive_path(path: pathlib.Path) -> bool:
+        lower_name = path.name.lower()
+        return path.suffix.lower() in {".zip", ".whl"} or lower_name.endswith((".tar.gz", ".tgz"))
+
+    def _fold_archive(self, path: pathlib.Path) -> None:
+        temporary = tempfile.TemporaryDirectory(prefix="giso-archive-")
+        root = pathlib.Path(temporary.name)
+        try:
+            if path.suffix.lower() in {".zip", ".whl"}:
+                self._extract_zip_archive(path, root)
+            else:
+                self._extract_tar_archive(path, root)
+            self._fold_archive_root(root)
+        except Exception:
+            temporary.cleanup()
+            raise
+        self._archive_roots.append(temporary)
+
+    @staticmethod
+    def _archive_target(root: pathlib.Path, name: str) -> pathlib.Path:
+        normalized = name.replace("\\", "/")
+        relative = pathlib.PurePosixPath(normalized)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError(f"Unsafe archive entry: {name}")
+        target = root.joinpath(*relative.parts).resolve()
+        resolved_root = root.resolve()
+        if target != resolved_root and resolved_root not in target.parents:
+            raise ValueError(f"Unsafe archive entry: {name}")
+        return target
+
+    def _extract_zip_archive(self, path: pathlib.Path, root: pathlib.Path) -> None:
+        try:
+            archive = zipfile.ZipFile(path)
+        except zipfile.BadZipFile as exc:
+            raise ValueError(f"Cannot fold invalid ZIP archive: {path}") from exc
+        with archive:
+            for member in archive.infolist():
+                target = self._archive_target(root, member.filename)
+                mode = member.external_attr >> 16
+                if stat.S_ISLNK(mode):
+                    raise ValueError(f"Archive links are not supported: {member.filename}")
+                if member.is_dir():
+                    target.mkdir(parents=True, exist_ok=True)
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with archive.open(member) as source, target.open("wb") as destination:
+                    shutil.copyfileobj(source, destination)
+
+    def _extract_tar_archive(self, path: pathlib.Path, root: pathlib.Path) -> None:
+        try:
+            archive = tarfile.open(path, mode="r:*")
+        except tarfile.TarError as exc:
+            raise ValueError(f"Cannot fold invalid TAR archive: {path}") from exc
+        with archive:
+            for member in archive.getmembers():
+                target = self._archive_target(root, member.name)
+                if member.issym() or member.islnk():
+                    raise ValueError(f"Archive links are not supported: {member.name}")
+                if member.isdir():
+                    target.mkdir(parents=True, exist_ok=True)
+                    continue
+                if not member.isfile():
+                    continue
+                source = archive.extractfile(member)
+                if source is None:
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with source, target.open("wb") as destination:
+                    shutil.copyfileobj(source, destination)
+
+    def _fold_archive_root(self, root: pathlib.Path) -> None:
+        package_roots: list[pathlib.Path] = []
+        for init_file in sorted(root.rglob("__init__.py")):
+            package_dir = init_file.parent
+            relative = package_dir.relative_to(root)
+            if self._is_ignored_archive_path(relative):
+                continue
+            if any((parent / "__init__.py").is_file() for parent in package_dir.parents if parent != root and root in parent.parents):
+                continue
+            package_roots.append(package_dir)
+
+        for package_root in package_roots:
+            self._fold_package_path(package_root)
+
+        for item in sorted(root.rglob("*.py")):
+            relative = item.relative_to(root)
+            if self._is_ignored_archive_path(relative) or item.name.startswith("_"):
+                continue
+            if any(package_root == item.parent or package_root in item.parents for package_root in package_roots):
+                continue
+            self._attach_module(item)
+
+    @staticmethod
+    def _is_ignored_archive_path(relative: pathlib.Path) -> bool:
+        ignored_suffixes = (".dist-info", ".egg-info")
+        ignored_names = {"__pycache__", "build", "dist"}
+        return any(part in ignored_names or part.endswith(ignored_suffixes) or part.endswith(".data") for part in relative.parts)
 
     def _fold_package_path(self, path: pathlib.Path) -> None:
         package_name = path.name
