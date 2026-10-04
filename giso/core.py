@@ -377,6 +377,9 @@ class Giso:
     def _fold_path(self, path: pathlib.Path) -> None:
         path = path.expanduser().resolve()
         if path.is_dir():
+            if (path / "__init__.py").is_file():
+                self._fold_package_path(path)
+                return
             for item in sorted(path.rglob("*.py")):
                 if item.name.startswith("_"):
                     continue
@@ -387,14 +390,93 @@ class Giso:
             return
         raise ValueError(f"Cannot fold path: {path}")
 
-    def _attach_module(self, path: pathlib.Path) -> None:
-        module_name = f"giso_folded_{path.stem}_{abs(hash(path))}"
-        spec = importlib.util.spec_from_file_location(module_name, path)
+    def _fold_package_path(self, path: pathlib.Path) -> None:
+        package_name = path.name
+        if not package_name.isidentifier() or package_name.startswith("_"):
+            raise ValueError(f"Package directory must be a public Python identifier: {path}")
+
+        synthetic_root = f"_giso_package_{package_name}_{abs(hash(path))}"
+        root_module = self._load_module(
+            path / "__init__.py",
+            synthetic_root,
+            package_dir=path,
+        )
+        self.modules[str(path / "__init__.py")] = root_module
+        self._attach_module_with_prefix(root_module, package_name)
+
+        items = [item for item in path.rglob("*.py") if item != path / "__init__.py"]
+        items.sort(key=lambda item: (len(item.relative_to(path).parts), str(item)))
+        for item in items:
+            relative = item.relative_to(path)
+            if self._is_private_package_path(relative):
+                continue
+
+            if item.name == "__init__.py":
+                module_parts = relative.parent.parts
+                if not module_parts:
+                    continue
+                import_name = ".".join((synthetic_root, *module_parts))
+                public_prefix = ".".join((package_name, *module_parts))
+                module = self._load_or_get_module(item, import_name, package_dir=item.parent)
+            else:
+                module_parts = relative.with_suffix("").parts
+                import_name = ".".join((synthetic_root, *module_parts))
+                public_prefix = ".".join((package_name, *module_parts))
+                module = self._load_or_get_module(item, import_name)
+
+            self.modules[str(item)] = module
+            self._attach_module_with_prefix(module, public_prefix)
+
+    @staticmethod
+    def _is_private_package_path(relative: pathlib.Path) -> bool:
+        for part in relative.parts:
+            if part == "__init__.py":
+                continue
+            stem = pathlib.Path(part).stem
+            if stem.startswith("_"):
+                return True
+        return False
+
+    def _load_or_get_module(
+        self,
+        path: pathlib.Path,
+        module_name: str,
+        package_dir: pathlib.Path | None = None,
+    ) -> ModuleType:
+        module = sys.modules.get(module_name)
+        if module is not None:
+            module_file = getattr(module, "__file__", None)
+            if module_file and pathlib.Path(module_file).resolve() == path.resolve():
+                return module
+        return self._load_module(path, module_name, package_dir=package_dir)
+
+    @staticmethod
+    def _load_module(
+        path: pathlib.Path,
+        module_name: str,
+        package_dir: pathlib.Path | None = None,
+    ) -> ModuleType:
+        kwargs: dict[str, Any] = {}
+        if package_dir is not None:
+            kwargs["submodule_search_locations"] = [str(package_dir)]
+        spec = importlib.util.spec_from_file_location(module_name, path, **kwargs)
         if spec is None or spec.loader is None:
             raise ImportError(f"Cannot load module from {path}")
         module = importlib.util.module_from_spec(spec)
         sys.modules[module_name] = module
         spec.loader.exec_module(module)
+        return module
+
+    def _attach_module_with_prefix(self, module: ModuleType, prefix: str) -> None:
+        folded = type(self)(name=self.__name__)
+        folded._attach_component(module)
+        for operation_name, operation in folded.operations.items():
+            original = getattr(operation, "__giso_original__", operation)
+            self._attach_operation(f"{prefix}.{operation_name}", original)
+
+    def _attach_module(self, path: pathlib.Path) -> None:
+        module_name = f"giso_folded_{path.stem}_{abs(hash(path))}"
+        module = self._load_module(path, module_name)
         self.modules[str(path)] = module
         self._attach_component(module)
 
@@ -450,10 +532,12 @@ class Giso:
         needs_instance = bool(params and params[0].name in {"self", "cls"})
         if not needs_instance:
             return func
+
         @functools.wraps(func)
         def operation(*args, **kwargs):
             instance = cls()
             return getattr(instance, func.__name__)(*args, **kwargs)
+
         return operation
 
     def _attach_callable(self, func: Callable[..., Any]) -> None:
@@ -495,6 +579,7 @@ class Giso:
         def operation(*args: Any, **kwargs: Any) -> Any:
             value = func(*args, **kwargs)
             return self.results.add(operation_name, value)
+
         operation.__giso_original__ = func
         return operation
 

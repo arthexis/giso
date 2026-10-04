@@ -95,6 +95,8 @@ assert g.status() == "ready"
 
 A failed lookup never loops over one source repeatedly: each deferred source advances at most once for that lookup. A later lookup may advance it once again. Exhausted sources are discarded. Live iterator state is intentionally not cloned by `g + source`; only already-materialized capabilities and results are copied.
 
+Package directories are folded differently from ordinary directories. A directory containing `__init__.py` is treated as a Python package and its package/module hierarchy becomes part of the Giso capability path. For example, a package directory named `tools` containing `math.py` with a public `double()` function exposes `g.tools.math.double(...)`. Public callables in the package's `__init__.py` live directly under `g.tools`, and nested packages preserve their nested path. Package modules are loaded with package semantics, so relative imports continue to work. Directories without `__init__.py` keep the existing flat recursive folding behavior.
+
 The current experiment intentionally has no third-party runtime dependencies and no CLI, MCP, web server, recipes, security model, remote execution, deployment machinery, or application-specific integrations. The only goal is to preserve and explore the original GSoL idea: an object that can fold software into itself and gain capabilities while it is running.
 
 ## Supported folding
@@ -107,7 +109,8 @@ The current experiment intentionally has no third-party runtime dependencies and
 - mappings/dictionaries of foldable capabilities
 - imported Python modules
 - `.py` files
-- directories containing Python files
+- ordinary directories containing Python files, folded flat
+- Python package directories containing `__init__.py`, folded with package/module hierarchy preserved
 - nested lists/tuples/sets of the above
 - finite-looking `Sized` iterables, consumed eagerly
 - iterators/generators, retained as deferred live capability sources
