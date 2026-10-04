@@ -10,8 +10,10 @@ class Giso(SoapGiso):
 
     def _fold_soap(self, *args: Any, **kwargs: Any) -> None:
         before = len(self._soap_sources)
+        endpoint_overridden = kwargs.get("endpoint") is not None
         super()._fold_soap(*args, **kwargs)
         for source in self._soap_sources[before:]:
+            source["endpoint_overridden"] = endpoint_overridden
             self._attach_soap_operations(source)
 
     def _attach_soap_operations(self, source: dict[str, Any]) -> None:
@@ -46,7 +48,10 @@ class Giso(SoapGiso):
         source: dict[str, Any],
         discovered: dict[str, Any],
     ) -> dict[str, str]:
-        endpoint = source["endpoint"] or discovered.get("endpoint", "")
+        if source.get("endpoint_overridden"):
+            endpoint = source["endpoint"]
+        else:
+            endpoint = discovered.get("endpoint", "") or source["endpoint"]
         return {
             "service": str(discovered.get("service", "")),
             "port": str(discovered.get("port", "")),
