@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import pathlib
+import zipfile
+
 import pytest
 
 from giso import Giso
@@ -150,3 +153,89 @@ def test_unrelated_parent_lookup_does_not_advance_branch_live_source():
 
     assert requests == []
     assert giso.charger.live_status() == "live"
+
+
+def test_branch_collisions_follow_ordinary_fold_order():
+    def first():
+        return "first"
+
+    def second():
+        return "second"
+
+    first.__name__ = "status"
+    second.__name__ = "status"
+
+    ordinary = Giso(first, second)
+    branched = Giso(charger=(first, second))
+
+    assert ordinary.status() == "second"
+    assert branched.charger.status() == ordinary.status()
+
+
+def test_branch_mount_preserves_provenance_without_rewriting_source_identity():
+    child = Giso(protocol_status)
+    child.provenance.append(
+        {
+            "type": "github",
+            "source": "github:arthexis/example",
+            "commit": "abc123",
+        }
+    )
+
+    parent = Giso(charger={"protocol": child})
+
+    assert parent.provenance == child.provenance
+    assert parent.provenance[0]["source"] == "github:arthexis/example"
+    assert "branch" not in parent.provenance[0]
+
+
+def test_parent_calls_record_only_prefixed_result_names():
+    child = Giso(protocol_status)
+    child.protocol_status()
+    parent = Giso(charger=child)
+
+    assert parent.charger.protocol_status() == "protocol"
+
+    assert child.results.history == (("protocol_status", "protocol"),)
+    assert parent.results.history == (
+        ("charger.protocol_status", "protocol"),
+        ("charger.protocol_status", "protocol"),
+    )
+
+
+def test_static_hierarchical_tree_survives_copy_and_add():
+    original = Giso(charger={"protocol": protocol_status})
+
+    copied = Giso(original)
+    derived = original + meter_read
+
+    assert copied.charger.protocol.protocol_status() == "protocol"
+    assert derived.charger.protocol.protocol_status() == "protocol"
+    assert derived.meter_read() == 42
+    assert "meter_read" not in original.operations
+
+
+def test_ordinary_giso_copy_does_not_clone_branch_live_iterator_state():
+    requests: list[str] = []
+    child = Giso(live_provider(requests))
+    parent = Giso(charger=child)
+    copied = Giso(parent)
+
+    with pytest.raises(AttributeError):
+        _ = copied.charger
+
+    assert requests == []
+    assert parent.charger.live_status() == "live"
+    assert requests == ["live_status"]
+
+
+def test_branch_mount_preserves_archive_root_lifetime(tmp_path: pathlib.Path):
+    archive = tmp_path / "tools.zip"
+    with zipfile.ZipFile(archive, "w") as bundle:
+        bundle.writestr("tool.py", "def archive_status():\n    return 'archive'\n")
+
+    giso = Giso(charger=archive)
+
+    assert giso.charger.archive_status() == "archive"
+    assert len(giso._archive_roots) == 1
+    assert pathlib.Path(giso._archive_roots[0].name).exists()
