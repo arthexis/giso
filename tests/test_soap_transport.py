@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import io
-import pathlib
 import urllib.error
 
 import pytest
@@ -75,64 +74,56 @@ SOAP12_FAULT = b"""<?xml version="1.0"?>
 """
 
 
-def write_wsdl(tmp_path: pathlib.Path, content: str = WSDL) -> pathlib.Path:
-    path = tmp_path / "service.wsdl"
-    path.write_text(content, encoding="utf-8")
-    return path
-
-
-class Response(io.BytesIO):
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args):
-        self.close()
-
-
-def test_operation_posts_serialized_request_and_decodes_response(tmp_path, monkeypatch):
+def test_operation_posts_serialized_request_and_decodes_response(wsdl_file, bytes_response, monkeypatch):
     seen = {}
 
     def urlopen(request, timeout=30):
-        seen["url"] = request.full_url
-        seen["method"] = request.get_method()
-        seen["data"] = request.data
-        seen["content_type"] = request.get_header("Content-type")
-        seen["soap_action"] = request.get_header("Soapaction")
-        return Response(SOAP11_RESPONSE)
+        seen.update(
+            url=request.full_url,
+            method=request.get_method(),
+            data=request.data,
+            content_type=request.get_header("Content-type"),
+            soap_action=request.get_header("Soapaction"),
+        )
+        return bytes_response(SOAP11_RESPONSE)
 
     monkeypatch.setattr("urllib.request.urlopen", urlopen)
-    giso = Giso().soap(write_wsdl(tmp_path))
+    giso = Giso().soap(wsdl_file(WSDL))
 
     result = giso.customer_service.get_customer(body={"CustomerId": 7})
 
-    assert seen["url"] == "https://api.example.com/soap"
-    assert seen["method"] == "POST"
-    assert seen["data"].startswith(b"<?xml")
-    assert seen["content_type"] == "text/xml; charset=utf-8"
-    assert seen["soap_action"] == '"urn:GetCustomer"'
-    assert result == {
-        "Name": "Ada",
-        "Active": True,
-        "Tag": ["vip", "beta"],
+    assert seen == {
+        "url": "https://api.example.com/soap",
+        "method": "POST",
+        "data": seen["data"],
+        "content_type": "text/xml; charset=utf-8",
+        "soap_action": '"urn:GetCustomer"',
     }
+    assert seen["data"].startswith(b"<?xml")
+    assert result == {"Name": "Ada", "Active": True, "Tag": ["vip", "beta"]}
     assert giso.results.last == result
 
 
-def test_soap11_fault_from_successful_http_response_raises(tmp_path, monkeypatch):
-    monkeypatch.setattr("urllib.request.urlopen", lambda request, timeout=30: Response(SOAP11_FAULT))
-    giso = Giso().soap(write_wsdl(tmp_path))
+def test_soap11_fault_from_successful_http_response_raises(wsdl_file, bytes_response, monkeypatch):
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda request, timeout=30: bytes_response(SOAP11_FAULT),
+    )
+    giso = Giso().soap(wsdl_file(WSDL))
 
     with pytest.raises(SoapFault) as exc_info:
         giso.customer_service.get_customer(body={})
 
     fault = exc_info.value
-    assert fault.code == "soap:Client"
-    assert fault.reason == "Customer not found"
-    assert fault.detail == {"ErrorCode": "4041"}
-    assert fault.soap_version == "1.1"
+    assert (fault.code, fault.reason, fault.detail, fault.soap_version) == (
+        "soap:Client",
+        "Customer not found",
+        {"ErrorCode": "4041"},
+        "1.1",
+    )
 
 
-def test_soap_fault_body_is_parsed_even_when_http_status_is_error(tmp_path, monkeypatch):
+def test_soap_fault_body_is_parsed_even_when_http_status_is_error(wsdl_file, monkeypatch):
     def urlopen(request, timeout=30):
         raise urllib.error.HTTPError(
             request.full_url,
@@ -143,26 +134,32 @@ def test_soap_fault_body_is_parsed_even_when_http_status_is_error(tmp_path, monk
         )
 
     monkeypatch.setattr("urllib.request.urlopen", urlopen)
-    giso = Giso().soap(write_wsdl(tmp_path))
+    giso = Giso().soap(wsdl_file(WSDL))
 
     with pytest.raises(SoapFault, match="Customer not found"):
         giso.customer_service.get_customer(body={})
 
 
-def test_soap12_fault_is_decoded(tmp_path, monkeypatch):
-    monkeypatch.setattr("urllib.request.urlopen", lambda request, timeout=30: Response(SOAP12_FAULT))
-    giso = Giso().soap(write_wsdl(tmp_path, SOAP12_WSDL))
+def test_soap12_fault_is_decoded(wsdl_file, bytes_response, monkeypatch):
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda request, timeout=30: bytes_response(SOAP12_FAULT),
+    )
+    giso = Giso().soap(wsdl_file(SOAP12_WSDL))
 
     with pytest.raises(SoapFault) as exc_info:
         giso.customer_service.get_customer(body={})
 
-    assert exc_info.value.code == "soap:Sender"
-    assert exc_info.value.reason == "Bad request"
-    assert exc_info.value.detail == {"ErrorCode": "12"}
-    assert exc_info.value.soap_version == "1.2"
+    fault = exc_info.value
+    assert (fault.code, fault.reason, fault.detail, fault.soap_version) == (
+        "soap:Sender",
+        "Bad request",
+        {"ErrorCode": "12"},
+        "1.2",
+    )
 
 
-def test_non_soap_http_error_is_reported_cleanly(tmp_path, monkeypatch):
+def test_non_soap_http_error_is_reported_cleanly(wsdl_file, monkeypatch):
     def urlopen(request, timeout=30):
         raise urllib.error.HTTPError(
             request.full_url,
@@ -173,16 +170,19 @@ def test_non_soap_http_error_is_reported_cleanly(tmp_path, monkeypatch):
         )
 
     monkeypatch.setattr("urllib.request.urlopen", urlopen)
-    giso = Giso().soap(write_wsdl(tmp_path))
+    giso = Giso().soap(wsdl_file(WSDL))
 
     with pytest.raises(ValueError, match=r"SOAP request failed \(502\)"):
         giso.customer_service.get_customer(body={})
 
 
-def test_response_rejects_unsafe_xml(tmp_path, monkeypatch):
+def test_response_rejects_unsafe_xml(wsdl_file, bytes_response, monkeypatch):
     payload = b'<!DOCTYPE x [<!ENTITY boom "bad">]><x>&boom;</x>'
-    monkeypatch.setattr("urllib.request.urlopen", lambda request, timeout=30: Response(payload))
-    giso = Giso().soap(write_wsdl(tmp_path))
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda request, timeout=30: bytes_response(payload),
+    )
+    giso = Giso().soap(wsdl_file(WSDL))
 
     with pytest.raises(ValueError, match="disallowed XML declarations"):
         giso.customer_service.get_customer(body={})
