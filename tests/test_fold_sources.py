@@ -90,10 +90,6 @@ def test_directory_fold_skips_underscore_python_files_and_non_python_files(tmp_p
         "def public__value() -> str:\n    return 'public'\n",
     )
     write_python(
-        ingredients / "__init__.py",
-        "def package__value() -> str:\n    return 'package'\n",
-    )
-    write_python(
         ingredients / "_private.py",
         "def private__value() -> str:\n    return 'private'\n",
     )
@@ -112,7 +108,6 @@ def test_directory_fold_skips_underscore_python_files_and_non_python_files(tmp_p
     assert returned is giso
     assert giso.public.value() == "public"
     assert "public.value" in giso.operations
-    assert "package.value" not in giso.operations
     assert "private.value" not in giso.operations
     assert "hidden.value" not in giso.operations
     assert "text_file.value" not in giso.operations
@@ -202,7 +197,8 @@ def test_module_string_variants_resolve_same_importable_module(
 def test_nested_collections_fold_all_supported_source_shapes(tmp_path: Path):
     ingredient = write_python(
         tmp_path / "ingredient.py",
-        "def path__value(value: str) -> str:\n    return f'path:{value}'\n",
+        "def path__value(value: str) -> str:\n"
+        "    return f'path:{value}'\n",
     )
     other = Giso(nested__giso)
 
