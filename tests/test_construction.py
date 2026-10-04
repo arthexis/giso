@@ -221,8 +221,9 @@ def test_ordinary_giso_copy_does_not_clone_branch_live_iterator_state():
     parent = Giso(charger=child)
     copied = Giso(parent)
 
-    with pytest.raises(AttributeError):
-        _ = copied.charger
+    assert "charger.live_status" not in copied.operations
+    with pytest.raises(KeyError):
+        _ = copied["charger.live_status"]
 
     assert requests == []
     assert parent.charger.live_status() == "live"
