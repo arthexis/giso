@@ -2,7 +2,7 @@
 
 Giso is an experiment in building a live Python object by folding software into it.
 
-A `Giso` starts almost empty. Fold in Python functions, classes, object instances, mappings, modules, packages, files, directories, finite iterables, or live iterator sources and it mutates in place to expose the capabilities it discovers.
+A `Giso` starts almost empty. Fold in Python functions, classes, object instances, mappings, modules, packages, files, directories, archives, wheels, finite iterables, or live iterator sources and it mutates in place to expose the capabilities it discovers.
 
 ```python
 from giso import Giso
@@ -114,6 +114,18 @@ assert same.my_tools.text.slugify("Hello Giso") == "hello-giso"
 
 Private submodules and subpackages whose path components begin with `_` are skipped. Ordinary imported modules remain flat and preserve their previous behavior.
 
+Archives can be folded directly from a filesystem path. Giso supports `.zip`, `.whl`, `.tar.gz`, and `.tgz`: it extracts them into a private temporary root, discovers package roots and standalone Python files, and feeds those sources through the same existing folding rules. Wheel metadata such as `.dist-info` and `.data` is not treated as a capability source.
+
+```python
+from giso import Giso
+
+
+g = Giso("dist/my_tools-1.0-py3-none-any.whl")
+assert g.my_tools.math.double(4) == 8
+```
+
+The private extraction root is retained for the lifetime of the Giso so folded code can continue to read package resources after construction. Archive entries that attempt path traversal or use links are rejected rather than extracted.
+
 The current experiment intentionally has no third-party runtime dependencies and no CLI, MCP, web server, recipes, security model, remote execution, deployment machinery, or application-specific integrations. The only goal is to preserve and explore the original GSoL idea: an object that can fold software into itself and gain capabilities while it is running.
 
 ## Supported folding
@@ -129,6 +141,9 @@ The current experiment intentionally has no third-party runtime dependencies and
 - `.py` files
 - ordinary directories containing Python files, folded flat
 - Python package directories containing `__init__.py`, folded with package/module hierarchy preserved
+- `.zip` archives
+- Python `.whl` files
+- `.tar.gz` / `.tgz` archives
 - nested lists/tuples/sets of the above
 - finite-looking `Sized` iterables, consumed eagerly
 - iterators/generators, retained as deferred live capability sources
