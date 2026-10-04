@@ -16,6 +16,14 @@ from .github import Giso as GitHubGiso
 class Giso(GitHubGiso):
     """A Giso that can also resolve explicit public PyPI package sources."""
 
+    def pypi(self, project: str, *, version: str | None = None) -> "Giso":
+        """Fold a public PyPI project without requiring a ``pypi:`` source prefix."""
+        source = f"pypi:{project}"
+        if version is not None:
+            source += f"@{version}"
+        self._fold_pypi(source)
+        return self
+
     def _fold_string(self, source: str) -> None:
         if source.startswith("pypi:"):
             self._fold_pypi(source)
