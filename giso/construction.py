@@ -119,6 +119,9 @@ class Giso(SoapSchemaGiso):
         result_offset: int = 0,
     ) -> int:
         self.modules.update(child.modules)
+        for entry in getattr(child, "provenance", ()):
+            if entry not in self.provenance:
+                self.provenance.append(dict(entry))
         for root in child._archive_roots:
             if root not in self._archive_roots:
                 self._archive_roots.append(root)
