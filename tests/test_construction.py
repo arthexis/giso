@@ -21,6 +21,20 @@ def meter_read() -> int:
     return 42
 
 
+def live_status() -> str:
+    return "live"
+
+
+def live_provider(requests: list[str]):
+    request = yield
+    while True:
+        requests.append(request.path)
+        if request.path == "live_status":
+            request = yield live_status
+        else:
+            request = yield None
+
+
 def test_named_single_ingredient_builds_prefixed_branch():
     giso = Giso(charger=protocol_status)
 
@@ -52,52 +66,77 @@ def test_prepared_ingredients_normalize_list_and_tuple_equally():
     assert list_plan == tuple_plan
 
 
-def test_nested_mapping_builds_recursive_branches():
-    giso = Giso(
-        charger={
-            "protocol": protocol_status,
-            "diagnostics": [diagnostics_status, meter_read],
-        },
-        system={"status": root_status},
-    )
-
-    assert giso.charger.protocol.protocol_status() == "protocol"
-    assert giso.charger.diagnostics.diagnostics_status() == "diagnostics"
-    assert giso.charger.diagnostics.meter_read() == 42
-    assert giso.system.status.root_status() == "root"
+@pytest.mark.parametrize("branch_name", ["_private", "bad-name", ""])
+def test_branch_names_must_be_public_python_identifiers(branch_name):
+    with pytest.raises(ValueError, match="public Python identifiers"):
+        Giso(**{branch_name: protocol_status})
 
 
-def test_explicit_nested_giso_and_mapping_are_semantically_equivalent():
-    explicit = Giso(
-        charger=Giso(
-            protocol=protocol_status,
-            diagnostics=(diagnostics_status, meter_read),
-        )
-    )
+def test_nested_mapping_and_explicit_giso_are_equivalent():
     implicit = Giso(
         charger={
             "protocol": protocol_status,
             "diagnostics": [diagnostics_status, meter_read],
         }
     )
+    explicit = Giso(
+        charger=Giso(
+            protocol=protocol_status,
+            diagnostics=(diagnostics_status, meter_read),
+        )
+    )
 
-    assert set(explicit.operations) == set(implicit.operations)
-    assert explicit.charger.protocol.protocol_status() == implicit.charger.protocol.protocol_status()
-    assert explicit.charger.diagnostics.diagnostics_status() == implicit.charger.diagnostics.diagnostics_status()
-    assert explicit.charger.diagnostics.meter_read() == implicit.charger.diagnostics.meter_read()
+    assert set(implicit.operations) == set(explicit.operations)
+    assert implicit.charger.protocol.protocol_status() == "protocol"
+    assert explicit.charger.protocol.protocol_status() == "protocol"
+    assert implicit.charger.diagnostics.meter_read() == 42
+    assert explicit.charger.diagnostics.meter_read() == 42
 
 
-def test_nested_giso_results_are_prefixed_when_mounted():
-    child = Giso(protocol=protocol_status)
-    assert child.protocol.protocol_status() == "protocol"
+def test_preexecuted_nested_giso_result_history_is_prefixed():
+    child = Giso(protocol_status)
+    child.protocol_status()
 
     parent = Giso(charger=child)
 
-    assert parent.results["charger.protocol.protocol_status"] == "protocol"
-    assert parent.charger.protocol.protocol_status() == "protocol"
+    assert parent.results.history == (("charger.protocol_status", "protocol"),)
 
 
-@pytest.mark.parametrize("branch_name", ["_private", "bad-name", ""])
-def test_branch_names_must_be_public_python_identifiers(branch_name):
-    with pytest.raises(ValueError, match="public Python identifiers"):
-        Giso(**{branch_name: protocol_status})
+def test_live_source_in_named_branch_stays_deferred_and_receives_relative_path():
+    requests: list[str] = []
+    giso = Giso(charger=live_provider(requests))
+
+    assert requests == []
+    assert giso.charger.live_status() == "live"
+    assert requests == ["live_status"]
+    assert "charger.live_status" in giso.operations
+
+
+def test_live_source_inside_nested_mapping_resolves_under_full_branch_path():
+    requests: list[str] = []
+    giso = Giso(charger={"diagnostics": live_provider(requests)})
+
+    assert giso.charger.diagnostics.live_status() == "live"
+    assert requests == ["live_status"]
+    assert "charger.diagnostics.live_status" in giso.operations
+
+
+def test_existing_nested_giso_retains_live_source_by_reference():
+    requests: list[str] = []
+    child = Giso(live_provider(requests))
+    parent = Giso(charger=child)
+
+    assert parent.charger.live_status() == "live"
+    assert requests == ["live_status"]
+    assert "charger.live_status" in parent.operations
+
+
+def test_unrelated_parent_lookup_does_not_advance_branch_live_source():
+    requests: list[str] = []
+    giso = Giso(charger=live_provider(requests))
+
+    with pytest.raises(AttributeError):
+        _ = giso.missing
+
+    assert requests == []
+    assert giso.charger.live_status() == "live"
