@@ -83,7 +83,7 @@ def payload_from(request, envelope_ns: str):
 def test_schema_backed_body_serializes_nested_optional_and_repeated_values(tmp_path):
     giso = Giso().soap(write_wsdl(tmp_path))
 
-    request = giso.customer_service.update_customer(
+    request = giso.customer_service.update_customer.prepare(
         body={
             "CustomerId": 7,
             "Active": True,
@@ -106,14 +106,14 @@ def test_schema_backed_body_requires_required_fields(tmp_path):
     giso = Giso().soap(write_wsdl(tmp_path))
 
     with pytest.raises(ValueError, match="CustomerId"):
-        giso.customer_service.update_customer(body={"Active": True})
+        giso.customer_service.update_customer.prepare(body={"Active": True})
 
 
 def test_schema_backed_body_rejects_unknown_fields(tmp_path):
     giso = Giso().soap(write_wsdl(tmp_path))
 
     with pytest.raises(ValueError, match="Unknown SOAP body fields"):
-        giso.customer_service.update_customer(
+        giso.customer_service.update_customer.prepare(
             body={"CustomerId": 7, "Active": True, "Mystery": "x"}
         )
 
@@ -122,7 +122,7 @@ def test_repeated_field_requires_sequence(tmp_path):
     giso = Giso().soap(write_wsdl(tmp_path))
 
     with pytest.raises(TypeError, match="Repeated SOAP body field"):
-        giso.customer_service.update_customer(
+        giso.customer_service.update_customer.prepare(
             body={"CustomerId": 7, "Active": True, "Tag": "vip"}
         )
 
@@ -130,7 +130,7 @@ def test_repeated_field_requires_sequence(tmp_path):
 def test_soap12_uses_soap12_envelope_and_action_content_type(tmp_path):
     giso = Giso().soap(write_wsdl(tmp_path, SOAP12_WSDL))
 
-    request = giso.customer_service.update_customer(
+    request = giso.customer_service.update_customer.prepare(
         body={"CustomerId": 7, "Active": False}
     )
 
@@ -149,7 +149,7 @@ def test_explicit_headers_are_preserved_without_overwriting_transport_defaults(t
         headers={"Authorization": "Bearer secret", "Content-Type": "custom/type"},
     )
 
-    request = giso.customer_service.update_customer(
+    request = giso.customer_service.update_customer.prepare(
         body={"CustomerId": 7, "Active": True}
     )
 
