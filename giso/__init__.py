@@ -1,6 +1,7 @@
 from .core import CapabilityRequest, Namespace, Results, Sigil
 from .soap_envelope import SoapRequest
-from .soap_transport import Giso, SoapFault
+from .soap_schema import Giso, UnsupportedSoapSchema
+from .soap_transport import SoapFault
 
 __all__ = [
     "CapabilityRequest",
@@ -10,4 +11,5 @@ __all__ = [
     "Sigil",
     "SoapFault",
     "SoapRequest",
+    "UnsupportedSoapSchema",
 ]
