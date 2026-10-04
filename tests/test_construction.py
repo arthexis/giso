@@ -112,6 +112,16 @@ def test_live_source_in_named_branch_stays_deferred_and_receives_relative_path()
     assert "charger.live_status" in giso.operations
 
 
+def test_live_source_in_named_collection_coexists_with_static_ingredients():
+    requests: list[str] = []
+    giso = Giso(charger=[protocol_status, live_provider(requests)])
+
+    assert giso.charger.protocol_status() == "protocol"
+    assert requests == []
+    assert giso.charger.live_status() == "live"
+    assert requests == ["live_status"]
+
+
 def test_live_source_inside_nested_mapping_resolves_under_full_branch_path():
     requests: list[str] = []
     giso = Giso(charger={"diagnostics": live_provider(requests)})
