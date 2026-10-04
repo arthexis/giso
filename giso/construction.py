@@ -15,6 +15,8 @@ class _PreparedBranch:
 
 @dataclass(frozen=True)
 class _PreparedIngredients:
+    """Normalized constructor inputs before they are folded into a live Giso."""
+
     roots: tuple[Any, ...]
     branches: tuple[_PreparedBranch, ...]
 
@@ -119,12 +121,12 @@ class Giso(SoapSchemaGiso):
         result_offset: int = 0,
     ) -> int:
         self.modules.update(child.modules)
-        for entry in getattr(child, "provenance", ()):
-            if entry not in self.provenance:
-                self.provenance.append(dict(entry))
         for root in child._archive_roots:
             if root not in self._archive_roots:
                 self._archive_roots.append(root)
+        for entry in getattr(child, "provenance", ()):
+            if entry not in self.provenance:
+                self.provenance.append(dict(entry))
         for operation_name, operation in child.operations.items():
             mounted_name = f"{branch_name}.{operation_name}"
             if mounted_name in self.operations:
