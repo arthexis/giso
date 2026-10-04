@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import pathlib
-import xml.etree.ElementTree as ET
-
 import pytest
 
 from giso import Giso
@@ -68,20 +65,8 @@ SOAP12_WSDL = WSDL.replace(
 )
 
 
-def write_wsdl(tmp_path: pathlib.Path, content: str = WSDL) -> pathlib.Path:
-    path = tmp_path / "customer.wsdl"
-    path.write_text(content, encoding="utf-8")
-    return path
-
-
-def payload_from(request, envelope_ns: str):
-    root = ET.fromstring(request.body)
-    body = root.find(f"{{{envelope_ns}}}Body")
-    return list(body)[0]
-
-
-def test_schema_backed_body_serializes_nested_optional_and_repeated_values(tmp_path):
-    giso = Giso().soap(write_wsdl(tmp_path))
+def test_schema_backed_body_serializes_nested_optional_and_repeated_values(wsdl_file, soap_payload):
+    giso = Giso().soap(wsdl_file(WSDL, "customer.wsdl"))
 
     request = giso.customer_service.update_customer.prepare(
         body={
@@ -92,7 +77,7 @@ def test_schema_backed_body_serializes_nested_optional_and_repeated_values(tmp_p
         }
     )
 
-    payload = payload_from(request, "http://schemas.xmlsoap.org/soap/envelope/")
+    payload = soap_payload(request, "http://schemas.xmlsoap.org/soap/envelope/")
     assert payload.tag == "{urn:customer}UpdateCustomerRequest"
     assert payload.find("CustomerId").text == "7"
     assert payload.find("Name") is None
@@ -102,15 +87,15 @@ def test_schema_backed_body_serializes_nested_optional_and_repeated_values(tmp_p
     assert payload.find("Address/Zip") is None
 
 
-def test_schema_backed_body_requires_required_fields(tmp_path):
-    giso = Giso().soap(write_wsdl(tmp_path))
+def test_schema_backed_body_requires_required_fields(wsdl_file):
+    giso = Giso().soap(wsdl_file(WSDL, "customer.wsdl"))
 
     with pytest.raises(ValueError, match="CustomerId"):
         giso.customer_service.update_customer.prepare(body={"Active": True})
 
 
-def test_schema_backed_body_rejects_unknown_fields(tmp_path):
-    giso = Giso().soap(write_wsdl(tmp_path))
+def test_schema_backed_body_rejects_unknown_fields(wsdl_file):
+    giso = Giso().soap(wsdl_file(WSDL, "customer.wsdl"))
 
     with pytest.raises(ValueError, match="Unknown SOAP body fields"):
         giso.customer_service.update_customer.prepare(
@@ -118,8 +103,8 @@ def test_schema_backed_body_rejects_unknown_fields(tmp_path):
         )
 
 
-def test_repeated_field_requires_sequence(tmp_path):
-    giso = Giso().soap(write_wsdl(tmp_path))
+def test_repeated_field_requires_sequence(wsdl_file):
+    giso = Giso().soap(wsdl_file(WSDL, "customer.wsdl"))
 
     with pytest.raises(TypeError, match="Repeated SOAP body field"):
         giso.customer_service.update_customer.prepare(
@@ -127,8 +112,8 @@ def test_repeated_field_requires_sequence(tmp_path):
         )
 
 
-def test_soap12_uses_soap12_envelope_and_action_content_type(tmp_path):
-    giso = Giso().soap(write_wsdl(tmp_path, SOAP12_WSDL))
+def test_soap12_uses_soap12_envelope_and_action_content_type(wsdl_file, soap_payload):
+    giso = Giso().soap(wsdl_file(SOAP12_WSDL, "customer.wsdl"))
 
     request = giso.customer_service.update_customer.prepare(
         body={"CustomerId": 7, "Active": False}
@@ -139,13 +124,13 @@ def test_soap12_uses_soap12_envelope_and_action_content_type(tmp_path):
         'application/soap+xml; charset=utf-8; action="urn:UpdateCustomer"'
     )
     assert "SOAPAction" not in request.headers
-    payload = payload_from(request, "http://www.w3.org/2003/05/soap-envelope")
+    payload = soap_payload(request, "http://www.w3.org/2003/05/soap-envelope")
     assert payload.tag == "{urn:customer}UpdateCustomerRequest"
 
 
-def test_explicit_headers_are_preserved_without_overwriting_transport_defaults(tmp_path):
+def test_explicit_headers_are_preserved_without_overwriting_transport_defaults(wsdl_file):
     giso = Giso().soap(
-        write_wsdl(tmp_path),
+        wsdl_file(WSDL, "customer.wsdl"),
         headers={"Authorization": "Bearer secret", "Content-Type": "custom/type"},
     )
 
