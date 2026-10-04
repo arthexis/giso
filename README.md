@@ -2,7 +2,7 @@
 
 Giso is an experiment in building a live Python object by folding software into it.
 
-A `Giso` starts almost empty. Fold in Python functions, classes, object instances, mappings, modules, files, or directories and it mutates in place to expose the capabilities it discovers.
+A `Giso` starts almost empty. Fold in Python functions, classes, object instances, mappings, modules, files, directories, finite iterables, or live iterator sources and it mutates in place to expose the capabilities it discovers.
 
 ```python
 from giso import Giso
@@ -68,6 +68,33 @@ assert g.tools.math.double(4) == 8
 
 Nested mappings create nested namespaces. Callable leaves use their mapping key as the operation name. Other supported fold sources keep their discovered capability surface under the mapping key as a prefix. Mapping keys must be public Python identifiers.
 
+Finite-looking iterables that implement both `Iterable` and `Sized` are consumed eagerly and each item is folded through the normal source rules. Iterators and generators are different: they are retained as private live sources and are not consumed during `fold()`.
+
+When a capability lookup misses, each live source gets at most one chance to provide a new ingredient for that lookup. Plain iterators advance once. Generators that support `send()` receive a `CapabilityRequest` containing the unresolved path after they are primed, so they can choose an ingredient specifically for the requested capability.
+
+```python
+from giso import CapabilityRequest, Giso
+
+
+def status() -> str:
+    return "ready"
+
+
+def provider():
+    request = yield
+    while True:
+        if request.path == "status":
+            request = yield status
+        else:
+            request = yield None
+
+
+g = Giso(provider())
+assert g.status() == "ready"
+```
+
+A failed lookup never loops over one source repeatedly: each deferred source advances at most once for that lookup. A later lookup may advance it once again. Exhausted sources are discarded. Live iterator state is intentionally not cloned by `g + source`; only already-materialized capabilities and results are copied.
+
 The current experiment intentionally has no third-party runtime dependencies and no CLI, MCP, web server, recipes, security model, remote execution, deployment machinery, or application-specific integrations. The only goal is to preserve and explore the original GSoL idea: an object that can fold software into itself and gain capabilities while it is running.
 
 ## Supported folding
@@ -82,6 +109,8 @@ The current experiment intentionally has no third-party runtime dependencies and
 - `.py` files
 - directories containing Python files
 - nested lists/tuples/sets of the above
+- finite-looking `Sized` iterables, consumed eagerly
+- iterators/generators, retained as deferred live capability sources
 
 Imported callables from a folded module are ignored; only functions and classes defined by that module are attached.
 
