@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import io
-import pathlib
-
 import pytest
 
 from giso import Giso, UnsupportedSoapSchema
@@ -33,15 +30,13 @@ WSDL_TEMPLATE = """<?xml version="1.0"?>
 """
 
 
-def write_wsdl(tmp_path: pathlib.Path, schema: str) -> pathlib.Path:
-    path = tmp_path / "service.wsdl"
-    path.write_text(WSDL_TEMPLATE.format(schema=schema), encoding="utf-8")
-    return path
+def schema_giso(wsdl_file, schema: str) -> Giso:
+    return Giso().soap(wsdl_file(WSDL_TEMPLATE.format(schema=schema)))
 
 
-def test_inline_enum_restriction_is_enforced(tmp_path):
-    path = write_wsdl(
-        tmp_path,
+def test_inline_enum_restriction_is_enforced(wsdl_file):
+    giso = schema_giso(
+        wsdl_file,
         """
         <xsd:element name="Request"><xsd:complexType><xsd:sequence>
           <xsd:element name="Mode">
@@ -52,17 +47,15 @@ def test_inline_enum_restriction_is_enforced(tmp_path):
         </xsd:sequence></xsd:complexType></xsd:element>
         """,
     )
-    giso = Giso().soap(path)
 
-    request = giso.test_service.run.prepare(body={"Mode": "fast"})
-    assert b"fast" in request.body
+    assert b"fast" in giso.test_service.run.prepare(body={"Mode": "fast"}).body
     with pytest.raises(ValueError, match="fast, safe"):
         giso.test_service.run.prepare(body={"Mode": "turbo"})
 
 
-def test_named_enum_restriction_is_enforced(tmp_path):
-    path = write_wsdl(
-        tmp_path,
+def test_named_enum_restriction_is_enforced(wsdl_file):
+    giso = schema_giso(
+        wsdl_file,
         """
         <xsd:simpleType name="Mode"><xsd:restriction base="xsd:string">
           <xsd:enumeration value="fast"/><xsd:enumeration value="safe"/>
@@ -72,22 +65,20 @@ def test_named_enum_restriction_is_enforced(tmp_path):
         </xsd:sequence></xsd:complexType></xsd:element>
         """,
     )
-    giso = Giso().soap(path)
 
     with pytest.raises(ValueError, match="fast, safe"):
         giso.test_service.run.prepare(body={"Mode": "other"})
 
 
-def test_finite_occurrence_bounds_are_enforced(tmp_path):
-    path = write_wsdl(
-        tmp_path,
+def test_finite_occurrence_bounds_are_enforced(wsdl_file):
+    giso = schema_giso(
+        wsdl_file,
         """
         <xsd:element name="Request"><xsd:complexType><xsd:sequence>
           <xsd:element name="Tag" type="xsd:string" minOccurs="2" maxOccurs="3"/>
         </xsd:sequence></xsd:complexType></xsd:element>
         """,
     )
-    giso = Giso().soap(path)
 
     giso.test_service.run.prepare(body={"Tag": ["a", "b"]})
     with pytest.raises(ValueError, match="at least 2"):
@@ -96,47 +87,44 @@ def test_finite_occurrence_bounds_are_enforced(tmp_path):
         giso.test_service.run.prepare(body={"Tag": ["a", "b", "c", "d"]})
 
 
-def test_choice_fails_explicitly(tmp_path):
-    path = write_wsdl(
-        tmp_path,
-        """
-        <xsd:element name="Request"><xsd:complexType><xsd:choice>
-          <xsd:element name="A" type="xsd:string"/><xsd:element name="B" type="xsd:string"/>
-        </xsd:choice></xsd:complexType></xsd:element>
-        """,
-    )
-    giso = Giso().soap(path)
+@pytest.mark.parametrize(
+    ("schema", "message"),
+    [
+        (
+            """
+            <xsd:element name="Request"><xsd:complexType><xsd:choice>
+              <xsd:element name="A" type="xsd:string"/><xsd:element name="B" type="xsd:string"/>
+            </xsd:choice></xsd:complexType></xsd:element>
+            """,
+            "xsd:choice",
+        ),
+        (
+            """
+            <xsd:element name="Request"><xsd:complexType><xsd:sequence>
+              <xsd:element name="Value" type="xsd:string"/>
+            </xsd:sequence><xsd:attribute name="kind" type="xsd:string"/></xsd:complexType></xsd:element>
+            """,
+            "attributes",
+        ),
+    ],
+)
+def test_unsupported_schema_constructs_fail_explicitly(wsdl_file, schema, message):
+    giso = schema_giso(wsdl_file, schema)
 
-    with pytest.raises(UnsupportedSoapSchema, match="xsd:choice"):
-        giso.test_service.run.prepare(body={"A": "x"})
-
-
-def test_attributes_fail_explicitly(tmp_path):
-    path = write_wsdl(
-        tmp_path,
-        """
-        <xsd:element name="Request"><xsd:complexType><xsd:sequence>
-          <xsd:element name="Value" type="xsd:string"/>
-        </xsd:sequence><xsd:attribute name="kind" type="xsd:string"/></xsd:complexType></xsd:element>
-        """,
-    )
-    giso = Giso().soap(path)
-
-    with pytest.raises(UnsupportedSoapSchema, match="attributes"):
-        giso.test_service.run.prepare(body={"Value": "x"})
+    with pytest.raises(UnsupportedSoapSchema, match=message):
+        giso.test_service.run.prepare(body={"A": "x", "Value": "x"})
 
 
-def test_cloned_soap_operation_keeps_prepare_and_executes(monkeypatch, tmp_path):
-    path = write_wsdl(
-        tmp_path,
+def test_cloned_soap_operation_keeps_prepare_execution_and_results(wsdl_file, bytes_response, monkeypatch):
+    giso = schema_giso(
+        wsdl_file,
         """
         <xsd:element name="Request"><xsd:complexType><xsd:sequence>
           <xsd:element name="Value" type="xsd:string"/>
         </xsd:sequence></xsd:complexType></xsd:element>
         """,
     )
-    source = Giso().soap(path)
-    folded = Giso(source)
+    folded = Giso(giso)
 
     request = folded.test_service.run.prepare(body={"Value": "hello"})
     assert request.endpoint == "https://api.example.com/soap"
@@ -145,11 +133,10 @@ def test_cloned_soap_operation_keeps_prepare_and_executes(monkeypatch, tmp_path)
     <soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
       <soap:Body><RunResponse xmlns="urn:test"><Ok>true</Ok></RunResponse></soap:Body>
     </soap:Envelope>'''
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda request, timeout=30: bytes_response(response_xml),
+    )
 
-    class Response(io.BytesIO):
-        def __enter__(self): return self
-        def __exit__(self, *args): self.close()
-
-    monkeypatch.setattr("urllib.request.urlopen", lambda request, timeout=30: Response(response_xml))
     assert folded.test_service.run(body={"Value": "hello"}) == {"Ok": True}
     assert folded.results.last == {"Ok": True}
