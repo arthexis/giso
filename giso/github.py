@@ -20,6 +20,22 @@ class Giso(CoreGiso):
         self.provenance: list[dict[str, str]] = []
         super().__init__(*sources, name=name)
 
+    def github(
+        self,
+        repository: str,
+        *,
+        ref: str | None = None,
+        subdirectory: str | None = None,
+    ) -> "Giso":
+        """Fold a public GitHub repository without requiring a ``github:`` source prefix."""
+        source = f"github:{repository}"
+        if ref is not None:
+            source += f"@{ref}"
+        if subdirectory is not None:
+            source += f"#{subdirectory}"
+        self._fold_github(source)
+        return self
+
     def _fold_string(self, source: str) -> None:
         if source.startswith("github:"):
             self._fold_github(source)
