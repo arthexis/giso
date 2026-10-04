@@ -2,7 +2,7 @@
 
 Giso is an experiment in building a live Python object by folding software into it.
 
-A `Giso` starts almost empty. Fold in Python functions, classes, object instances, mappings, modules, files, directories, finite iterables, or live iterator sources and it mutates in place to expose the capabilities it discovers.
+A `Giso` starts almost empty. Fold in Python functions, classes, object instances, mappings, modules, packages, files, directories, finite iterables, or live iterator sources and it mutates in place to expose the capabilities it discovers.
 
 ```python
 from giso import Giso
@@ -97,6 +97,23 @@ A failed lookup never loops over one source repeatedly: each deferred source adv
 
 Package directories are folded differently from ordinary directories. A directory containing `__init__.py` is treated as a Python package and its package/module hierarchy becomes part of the Giso capability path. For example, a package directory named `tools` containing `math.py` with a public `double()` function exposes `g.tools.math.double(...)`. Public callables in the package's `__init__.py` live directly under `g.tools`, and nested packages preserve their nested path. Package modules are loaded with package semantics, so relative imports continue to work. Directories without `__init__.py` keep the existing flat recursive folding behavior.
 
+Importable packages can also be folded directly, either as an imported package object or by package name. Giso recursively discovers public submodules and subpackages through the package's import metadata and preserves the real import path as the capability path:
+
+```python
+import my_tools
+
+from giso import Giso
+
+
+g = Giso(my_tools)
+assert g.my_tools.math.double(4) == 8
+
+same = Giso("my_tools")
+assert same.my_tools.text.slugify("Hello Giso") == "hello-giso"
+```
+
+Private submodules and subpackages whose path components begin with `_` are skipped. Ordinary imported modules remain flat and preserve their previous behavior.
+
 The current experiment intentionally has no third-party runtime dependencies and no CLI, MCP, web server, recipes, security model, remote execution, deployment machinery, or application-specific integrations. The only goal is to preserve and explore the original GSoL idea: an object that can fold software into itself and gain capabilities while it is running.
 
 ## Supported folding
@@ -107,7 +124,8 @@ The current experiment intentionally has no third-party runtime dependencies and
 - Python classes
 - configured Python object instances
 - mappings/dictionaries of foldable capabilities
-- imported Python modules
+- ordinary imported Python modules
+- imported/importable Python packages, recursively folded with package hierarchy preserved
 - `.py` files
 - ordinary directories containing Python files, folded flat
 - Python package directories containing `__init__.py`, folded with package/module hierarchy preserved
