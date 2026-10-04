@@ -1,8 +1,8 @@
 # Giso
 
-Giso is an experiment in building a live Python object by folding software into it.
+Giso is an experiment in building a live Python object by folding software and described services into it.
 
-A `Giso` starts almost empty. Fold in Python functions, classes, object instances, mappings, modules, packages, files, directories, archives, wheels, public GitHub repositories, finite iterables, or live iterator sources and it mutates in place to expose the capabilities it discovers.
+A `Giso` starts almost empty. Fold in Python functions, classes, object instances, mappings, modules, packages, files, directories, archives, repositories, package releases, or described network services and it mutates in place to expose the capabilities it discovers.
 
 ```python
 from giso import Giso
@@ -17,60 +17,125 @@ class DiagramTool:
         return f"valid:{path}"
 
 
-g = Giso()
-g.fold(math__double, DiagramTool)
-
+g = Giso(math__double, DiagramTool)
 assert g.math.double(4) == 8
 assert g.diagram_tool.validate("drawing.svg") == "valid:drawing.svg"
 ```
 
-The double underscore in a function name creates a namespace: `math__double` becomes `g.math.double`. Public methods on a folded class become operations under a snake-case namespace derived from the class name.
+The double underscore in a function name creates a namespace: `math__double` becomes `g.math.double`. Public methods on folded classes and configured object instances are exposed under snake-case class namespaces. Instance calls remain bound to the original object, so its state is preserved.
 
-Configured object instances can also be folded. Their public class-defined methods are attached under the same class-derived namespace, but calls remain bound to the original instance so its state is preserved:
-
-```python
-class Counter:
-    def __init__(self, value: int = 0):
-        self.value = value
-
-    def increment(self) -> int:
-        self.value += 1
-        return self.value
-
-
-counter = Counter(4)
-g = Giso(counter)
-
-assert g.counter.increment() == 5
-assert g.counter.increment() == 6
-assert counter.value == 6
-```
-
-Private methods, plain attributes, and properties on folded instances are not exposed as operations.
-
-Mappings provide a declarative way to define capability trees. Mapping keys define the exported path, so the callable's Python name does not have to match the Giso operation name:
+Mappings provide a declarative way to build capability trees:
 
 ```python
 def twice(value: int) -> int:
     return value * 2
 
 
-g = Giso({
-    "tools": {
-        "math": {
-            "double": twice,
-        },
-    },
-})
-
+g = Giso({"tools": {"math": {"double": twice}}})
 assert g.tools.math.double(4) == 8
 ```
 
-Nested mappings create nested namespaces. Callable leaves use their mapping key as the operation name. Other supported fold sources keep their discovered capability surface under the mapping key as a prefix. Mapping keys must be public Python identifiers.
+Nested mappings create nested namespaces. Callable leaves use their mapping key as the exported operation name.
 
-Finite-looking iterables that implement both `Iterable` and `Sized` are consumed eagerly and each item is folded through the normal source rules. Iterators and generators are different: they are retained as private live sources and are not consumed during `fold()`.
+## Python packages and archives
 
-When a capability lookup misses, each live source gets at most one chance to provide a new ingredient for that lookup. Plain iterators advance once. Generators that support `send()` receive a `CapabilityRequest` containing the unresolved path after they are primed, so they can choose an ingredient specifically for the requested capability.
+Importable packages can be folded directly by package object or import name. Package/module hierarchy is preserved, while ordinary imported modules retain flat behavior.
+
+Filesystem archives can also be folded. Giso supports `.zip`, `.whl`, `.tar.gz`, and `.tgz`; archives are extracted into a private temporary root and handed back to the normal local folding pipeline. Path traversal and archive links are rejected.
+
+Public GitHub repositories and PyPI releases use explicit resolvers:
+
+```python
+g = Giso("github:arthexis/example@main#src/plugin")
+g.pypi("requests", version="2.32.5")
+```
+
+Equivalent direct methods are available when the method itself already identifies the resolver:
+
+```python
+g = Giso()
+g.github("arthexis/example", ref="main", subdirectory="src/plugin")
+g.pypi("requests", version="2.32.5")
+```
+
+GitHub references resolve to an exact commit before folding. PyPI references select a verified release artifact and reuse the archive pipeline. Neither resolver installs software into the Python environment.
+
+## OpenAPI
+
+OpenAPI 3.x JSON descriptions can be loaded from local files or HTTPS sources:
+
+```python
+g = Giso().openapi("https://api.example.com/openapi.json")
+```
+
+The explicit string form is also supported:
+
+```python
+g = Giso("openapi:https://api.example.com/openapi.json")
+```
+
+The parsed description, selected base URL, and provenance are retained for REST operation generation. Request headers can be supplied to `openapi(...)`; they remain private and are not copied into provenance.
+
+## SOAP / WSDL
+
+SOAP services can be folded from a local WSDL 1.1 document or an HTTPS WSDL URL:
+
+```python
+from giso import Giso, SoapFault
+
+
+g = Giso().soap(
+    "https://example.com/customer?wsdl",
+    headers={"Authorization": "Bearer ..."},
+)
+
+customer = g.customer_service.get_customer(
+    body={"CustomerId": 7},
+)
+```
+
+The explicit resolver form is equivalent:
+
+```python
+g = Giso("soap:https://example.com/customer?wsdl")
+```
+
+Giso recursively loads WSDL imports and XSD imports/includes, discovers SOAP 1.1 and SOAP 1.2 bindings, and exposes operations under deterministic snake-case paths such as `customer_service.get_customer`. When multiple ports in one service expose the same operation, later collisions are disambiguated under `service.port.operation`.
+
+SOAP operation calls use a single `body=` mapping. The supported schema subset covers primitive/scalar values, booleans, nested `xsd:sequence` complex values, optional values, finite or unbounded repeated elements, nillable values, and simple enumeration restrictions. The request is serialized according to the WSDL binding and sent by HTTP POST.
+
+To inspect a request without sending it, use the operation's `prepare()` helper:
+
+```python
+request = g.customer_service.get_customer.prepare(
+    body={"CustomerId": 7},
+)
+
+print(request.endpoint)
+print(request.headers)
+print(request.body)
+```
+
+`prepare()` returns a `SoapRequest` containing the endpoint, transport headers, SOAP version/action, and serialized XML bytes.
+
+Successful SOAP responses are decoded into ordinary Python scalar/dict/list values. SOAP 1.1 and SOAP 1.2 Faults raise `SoapFault`:
+
+```python
+try:
+    g.customer_service.get_customer(body={"CustomerId": -1})
+except SoapFault as exc:
+    print(exc.code, exc.reason, exc.detail)
+```
+
+The SOAP implementation deliberately does **not** attempt to be a complete WSDL/XSD stack. Unsupported constructs such as `xsd:choice`, `xsd:all`, complex/simple content extension, XSD attributes, and wildcard `xsd:any` fail explicitly with `UnsupportedSoapSchema` instead of being guessed. WSDL 2.0, WS-Security, MTOM/attachments, XML signatures/encryption, and a general-purpose XSD engine are outside the current scope.
+
+Remote WSDL/XSD acquisition requires HTTPS. XML containing `DOCTYPE` or `ENTITY` declarations is rejected before parsing. Authentication/request headers remain private and are not written into provenance.
+
+## Live sources
+
+Finite-looking iterables implementing both `Iterable` and `Sized` are consumed eagerly. Iterators and generators are retained as private live sources and are not consumed during `fold()`.
+
+When a capability lookup misses, each live source gets at most one chance to provide a new ingredient. Generators supporting `send()` receive a `CapabilityRequest` containing the unresolved path after priming.
 
 ```python
 from giso import CapabilityRequest, Giso
@@ -93,81 +158,31 @@ g = Giso(provider())
 assert g.status() == "ready"
 ```
 
-A failed lookup never loops over one source repeatedly: each deferred source advances at most once for that lookup. A later lookup may advance it once again. Exhausted sources are discarded. Live iterator state is intentionally not cloned by `g + source`; only already-materialized capabilities and results are copied.
-
-Package directories are folded differently from ordinary directories. A directory containing `__init__.py` is treated as a Python package and its package/module hierarchy becomes part of the Giso capability path. For example, a package directory named `tools` containing `math.py` with a public `double()` function exposes `g.tools.math.double(...)`. Public callables in the package's `__init__.py` live directly under `g.tools`, and nested packages preserve their nested path. Package modules are loaded with package semantics, so relative imports continue to work. Directories without `__init__.py` keep the existing flat recursive folding behavior.
-
-Importable packages can also be folded directly, either as an imported package object or by package name. Giso recursively discovers public submodules and subpackages through the package's import metadata and preserves the real import path as the capability path:
-
-```python
-import my_tools
-
-from giso import Giso
-
-
-g = Giso(my_tools)
-assert g.my_tools.math.double(4) == 8
-
-same = Giso("my_tools")
-assert same.my_tools.text.slugify("Hello Giso") == "hello-giso"
-```
-
-Private submodules and subpackages whose path components begin with `_` are skipped. Ordinary imported modules remain flat and preserve their previous behavior.
-
-Archives can be folded directly from a filesystem path. Giso supports `.zip`, `.whl`, `.tar.gz`, and `.tgz`: it extracts them into a private temporary root, discovers package roots and standalone Python files, and feeds those sources through the same existing folding rules. Wheel metadata such as `.dist-info` and `.data` is not treated as a capability source.
-
-```python
-from giso import Giso
-
-
-g = Giso("dist/my_tools-1.0-py3-none-any.whl")
-assert g.my_tools.math.double(4) == 8
-```
-
-The private extraction root is retained for the lifetime of the Giso so folded code can continue to read package resources after construction. Archive entries that attempt path traversal or use links are rejected rather than extracted.
-
-Public GitHub repositories can be folded through an explicit resolver source. The resolver turns a branch or tag into an exact commit, caches that commit archive locally, and then hands the snapshot back to the existing archive and local folding machinery:
-
-```python
-from giso import Giso
-
-
-g = Giso("github:arthexis/example")
-versioned = Giso("github:arthexis/example@v1.2.0")
-plugin = Giso("github:arthexis/example@main#src/plugin")
-```
-
-The syntax is `github:owner/repository[@ref][#subdirectory]`. When `@ref` is omitted, the repository's default branch is resolved first. The requested ref is always resolved to an exact commit SHA before downloading, and the archive cache is keyed by that commit. `#subdirectory` folds only that path inside the repository snapshot. The resulting Giso records the source, requested/ref-resolved names, exact commit, and subdirectory in `g.provenance`.
-
-The GitHub resolver intentionally supports public repositories only. It does not use Git, install the repository, modify the Python environment, or handle credentials; those are separate concerns from folding a public immutable snapshot.
-
-The current experiment intentionally has no third-party runtime dependencies and no CLI, MCP, web server, recipes, security model, remote execution, deployment machinery, or application-specific integrations. The only goal is to preserve and explore the original GSoL idea: an object that can fold software into itself and gain capabilities while it is running.
+Exhausted sources are discarded. Live iterator state is intentionally not cloned by `g + source`; already-materialized capabilities and results are copied.
 
 ## Supported folding
 
 `Giso.fold(...)` currently accepts:
 
-- Python callables
-- Python classes
+- Python callables and classes
 - configured Python object instances
 - mappings/dictionaries of foldable capabilities
 - ordinary imported Python modules
-- imported/importable Python packages, recursively folded with package hierarchy preserved
-- `.py` files
-- ordinary directories containing Python files, folded flat
-- Python package directories containing `__init__.py`, folded with package/module hierarchy preserved
-- `.zip` archives
-- Python `.whl` files
-- `.tar.gz` / `.tgz` archives
-- public GitHub repository references using `github:owner/repository[@ref][#subdirectory]`
-- nested lists/tuples/sets of the above
-- finite-looking `Sized` iterables, consumed eagerly
-- iterators/generators, retained as deferred live capability sources
+- imported/importable Python packages
+- `.py` files and Python package directories
+- ordinary directories containing Python files
+- `.zip`, `.whl`, `.tar.gz`, and `.tgz` archives
+- public GitHub references using `github:owner/repository[@ref][#subdirectory]`
+- PyPI references using `pypi:project[@version]`
+- OpenAPI 3.x JSON descriptions using `openapi:<source>`
+- WSDL 1.1 SOAP descriptions using `soap:<source>`
+- nested lists/tuples/sets
+- finite-looking `Sized` iterables
+- deferred iterators/generators
+- another `Giso`
 
-Imported callables from a folded module are ignored; only functions and classes defined by that module are attached.
+Imported callables from a folded module are ignored; only functions and classes defined by that module are attached. Private package paths are skipped.
 
-Object instances expose public methods defined by their class while preserving the original bound instance and its state. Built-in values remain unsupported fold sources.
+`fold()` mutates the existing object and returns the same `Giso`, so notebook-style incremental construction works naturally. Direct resolver methods such as `github()`, `pypi()`, `openapi()`, and `soap()` follow the same fluent convention.
 
-Mappings recursively build capability namespaces. Callable leaves are renamed by their key; richer fold sources are prefixed by the mapping path while preserving their own discovered operations and result history.
-
-`fold()` mutates the existing object and returns the same `Giso`, so notebook-style incremental construction works naturally.
+The project intentionally has no third-party runtime dependencies and no CLI, MCP server, deployment machinery, or application-specific integrations. The goal remains narrow: explore a live object that can fold software and described external capability surfaces into one callable namespace.
