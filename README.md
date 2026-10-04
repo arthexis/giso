@@ -37,6 +37,73 @@ assert g.tools.math.double(4) == 8
 
 Nested mappings create nested namespaces. Callable leaves use their mapping key as the exported operation name.
 
+## Hierarchical construction
+
+`Giso` can also build a complete named capability tree directly in its constructor:
+
+```python
+g = Giso(
+    utilities,
+    charger={
+        "protocol": ocpp_csms,
+        "diagnostics": [charger_diagnostics, meter_tools],
+    },
+    system={
+        "network": network_tools,
+        "hardware": hardware_tools,
+    },
+)
+```
+
+Positional arguments are ordinary root-level ingredients. Keyword arguments create named branches. Branch values are normalized into a private prepared-ingredients tree before anything is folded:
+
+- one value means one ingredient in that branch;
+- a `list` or `tuple` means multiple ingredients folded into the same branch;
+- a mapping means recursively nested branch structure;
+- an explicit nested `Giso` is mounted as that branch.
+
+List and tuple forms are intentionally equivalent:
+
+```python
+a = Giso(charger=[ocpp_csms, charger_diagnostics])
+b = Giso(charger=(ocpp_csms, charger_diagnostics))
+```
+
+Mappings used as keyword branch values are structural constructor syntax. Positional mappings keep the existing mapping-fold behavior:
+
+```python
+Giso({"status": status})
+Giso(charger={"status": status})
+```
+
+The first exposes `status` at the root using the mapping key as the operation name. The second creates a `charger.status` branch and folds `status` as an ingredient inside it.
+
+Explicit nested Gisos and equivalent nested mappings produce the same capability shape:
+
+```python
+implicit = Giso(
+    charger={
+        "protocol": ocpp_csms,
+        "diagnostics": [charger_diagnostics, meter_tools],
+    }
+)
+
+explicit = Giso(
+    charger=Giso(
+        protocol=ocpp_csms,
+        diagnostics=(charger_diagnostics, meter_tools),
+    )
+)
+```
+
+Named construction preserves ordinary Giso semantics for collision order, provenance, results, archive/module lifetime, and static copy behavior. Resolver provenance keeps the original source identity; branch names change semantic placement, not where an ingredient came from.
+
+Live iterators and generators remain deferred inside their branch. A lookup such as `g.charger.diagnostics.status` is delegated to the branch-local live source using the relative path `diagnostics.status` or `status` as appropriate. Unrelated root lookups do not consume branch-local generators.
+
+An explicitly nested live `Giso` is retained by reference at that branch boundary so its deferred sources remain live. Ordinary `Giso(existing)` and `g + source` copy semantics still do not clone iterator/generator state.
+
+Branch names must be public Python identifiers. `fold()` itself is unchanged; hierarchical naming is constructor syntax rather than a second named-folding API.
+
 ## Python packages and archives
 
 Importable packages can be folded directly by package object or import name. Package/module hierarchy is preserved, while ordinary imported modules retain flat behavior.
