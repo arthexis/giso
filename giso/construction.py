@@ -146,7 +146,7 @@ class Giso(SoapSchemaGiso):
                     self.namespaces[part] = namespace
                     setattr(self, part, namespace)
             else:
-                existing = getattr(container, part, None)
+                existing = vars(container).get(part)
                 if isinstance(existing, Namespace):
                     namespace = existing
                 else:
