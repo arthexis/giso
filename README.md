@@ -2,7 +2,7 @@
 
 Giso is an experiment in building a live Python object by folding software into it.
 
-A `Giso` starts almost empty. Fold in Python functions, classes, object instances, mappings, modules, packages, files, directories, archives, wheels, finite iterables, or live iterator sources and it mutates in place to expose the capabilities it discovers.
+A `Giso` starts almost empty. Fold in Python functions, classes, object instances, mappings, modules, packages, files, directories, archives, wheels, public GitHub repositories, finite iterables, or live iterator sources and it mutates in place to expose the capabilities it discovers.
 
 ```python
 from giso import Giso
@@ -126,6 +126,21 @@ assert g.my_tools.math.double(4) == 8
 
 The private extraction root is retained for the lifetime of the Giso so folded code can continue to read package resources after construction. Archive entries that attempt path traversal or use links are rejected rather than extracted.
 
+Public GitHub repositories can be folded through an explicit resolver source. The resolver turns a branch or tag into an exact commit, caches that commit archive locally, and then hands the snapshot back to the existing archive and local folding machinery:
+
+```python
+from giso import Giso
+
+
+g = Giso("github:arthexis/example")
+versioned = Giso("github:arthexis/example@v1.2.0")
+plugin = Giso("github:arthexis/example@main#src/plugin")
+```
+
+The syntax is `github:owner/repository[@ref][#subdirectory]`. When `@ref` is omitted, the repository's default branch is resolved first. The requested ref is always resolved to an exact commit SHA before downloading, and the archive cache is keyed by that commit. `#subdirectory` folds only that path inside the repository snapshot. The resulting Giso records the source, requested/ref-resolved names, exact commit, and subdirectory in `g.provenance`.
+
+The GitHub resolver intentionally supports public repositories only. It does not use Git, install the repository, modify the Python environment, or handle credentials; those are separate concerns from folding a public immutable snapshot.
+
 The current experiment intentionally has no third-party runtime dependencies and no CLI, MCP, web server, recipes, security model, remote execution, deployment machinery, or application-specific integrations. The only goal is to preserve and explore the original GSoL idea: an object that can fold software into itself and gain capabilities while it is running.
 
 ## Supported folding
@@ -144,6 +159,7 @@ The current experiment intentionally has no third-party runtime dependencies and
 - `.zip` archives
 - Python `.whl` files
 - `.tar.gz` / `.tgz` archives
+- public GitHub repository references using `github:owner/repository[@ref][#subdirectory]`
 - nested lists/tuples/sets of the above
 - finite-looking `Sized` iterables, consumed eagerly
 - iterators/generators, retained as deferred live capability sources
