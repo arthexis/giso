@@ -5,6 +5,7 @@ import importlib
 import importlib.util
 import inspect
 import pathlib
+import pkgutil
 import re
 import shlex
 import sys
@@ -192,7 +193,9 @@ class Giso:
                 self._fold_path(source)
             elif isinstance(source, str):
                 self._fold_string(source)
-            elif inspect.isclass(source) or callable(source) or isinstance(source, ModuleType):
+            elif isinstance(source, ModuleType):
+                self._fold_imported_module(source)
+            elif inspect.isclass(source) or callable(source):
                 self._attach_component(source)
             elif isinstance(source, Iterator):
                 self._deferred_sources.append(_DeferredSource(source))
@@ -371,8 +374,30 @@ class Giso:
             module = importlib.import_module(module_name)
         except ModuleNotFoundError as exc:
             raise ValueError(f"Cannot fold path or import module: {source}") from exc
+        self._fold_imported_module(module)
+
+    def _fold_imported_module(self, module: ModuleType) -> None:
         self.modules[module.__name__] = module
+        if self._is_package_module(module):
+            self._fold_importable_package(module)
+            return
         self._attach_component(module)
+
+    @staticmethod
+    def _is_package_module(module: ModuleType) -> bool:
+        return bool(getattr(module, "__path__", None))
+
+    def _fold_importable_package(self, package: ModuleType) -> None:
+        root_name = package.__name__
+        self._attach_module_with_prefix(package, root_name)
+
+        for module_info in pkgutil.walk_packages(package.__path__, prefix=f"{root_name}."):
+            relative_name = module_info.name[len(root_name) + 1 :]
+            if any(part.startswith("_") for part in relative_name.split(".")):
+                continue
+            module = importlib.import_module(module_info.name)
+            self.modules[module.__name__] = module
+            self._attach_module_with_prefix(module, module.__name__)
 
     def _fold_path(self, path: pathlib.Path) -> None:
         path = path.expanduser().resolve()
