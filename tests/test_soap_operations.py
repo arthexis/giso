@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import pathlib
+import xml.etree.ElementTree as ET
 
-import pytest
-
-from giso import Giso
+from giso import Giso, SoapRequest
 
 
 WSDL = """<?xml version="1.0"?>
@@ -97,13 +96,21 @@ def test_endpoint_override_is_reflected_in_operation_metadata(tmp_path):
     assert giso.customer_service.get_customer.__giso_soap__["endpoint"] == "http://localhost:9000/service"
 
 
-def test_generated_operations_are_explicit_placeholders(tmp_path):
+def test_generated_operations_serialize_requests(tmp_path):
     giso = Giso().soap(write_wsdl(tmp_path))
 
-    with pytest.raises(NotImplementedError, match="serialization"):
-        giso.customer_service.get_customer(customer_id=7)
+    request = giso.customer_service.get_customer(body={"customer_id": 7})
 
-    assert giso.results.history == ()
+    assert isinstance(request, SoapRequest)
+    assert request.endpoint == "https://api.example.com/soap"
+    assert request.headers["Content-Type"] == "text/xml; charset=utf-8"
+    assert request.headers["SOAPAction"] == '"urn:GetCustomer"'
+    root = ET.fromstring(request.body)
+    body = root.find("{http://schemas.xmlsoap.org/soap/envelope/}Body")
+    payload = list(body)[0]
+    assert payload.tag == "{urn:test}GetCustomer"
+    assert payload.find("customer_id").text == "7"
+    assert giso.results.last is request
 
 
 def test_port_namespace_breaks_same_service_operation_collisions(tmp_path):
