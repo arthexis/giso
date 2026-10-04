@@ -9,7 +9,7 @@ from .soap_schema import Giso as SoapSchemaGiso
 @dataclass(frozen=True)
 class _PreparedBranch:
     name: str
-    ingredients: tuple[Any, ...]
+    prepared: "_PreparedIngredients"
 
 
 @dataclass(frozen=True)
@@ -24,10 +24,7 @@ class Giso(SoapSchemaGiso):
     def __init__(self, *sources: Any, name: str = "giso", **branches: Any):
         prepared = self._prepare_ingredients(sources, branches)
         super().__init__(name=name)
-        if prepared.roots:
-            self.fold(*prepared.roots)
-        for branch in prepared.branches:
-            self._construct_prepared_branch(branch)
+        self._construct_prepared(prepared)
 
     @classmethod
     def _prepare_ingredients(
@@ -35,32 +32,47 @@ class Giso(SoapSchemaGiso):
         sources: tuple[Any, ...],
         branches: Mapping[str, Any],
     ) -> _PreparedIngredients:
-        prepared_branches: list[_PreparedBranch] = []
-        for branch_name, value in branches.items():
-            cls._validate_branch_name(branch_name)
-            if isinstance(value, (list, tuple)):
-                ingredients = tuple(value)
-            else:
-                ingredients = (value,)
-            prepared_branches.append(
-                _PreparedBranch(name=branch_name, ingredients=ingredients)
-            )
+        prepared_branches = tuple(
+            cls._prepare_branch(branch_name, value)
+            for branch_name, value in branches.items()
+        )
         return _PreparedIngredients(
             roots=tuple(sources),
-            branches=tuple(prepared_branches),
+            branches=prepared_branches,
         )
 
+    @classmethod
+    def _prepare_branch(cls, name: str, value: Any) -> _PreparedBranch:
+        cls._validate_branch_name(name)
+        if isinstance(value, Mapping):
+            prepared = cls._prepare_ingredients((), value)
+        elif isinstance(value, (list, tuple)):
+            prepared = cls._prepare_ingredients(tuple(value), {})
+        else:
+            prepared = cls._prepare_ingredients((value,), {})
+        return _PreparedBranch(name=name, prepared=prepared)
+
+    def _construct_prepared(self, prepared: _PreparedIngredients) -> None:
+        if prepared.roots:
+            self.fold(*prepared.roots)
+        for branch in prepared.branches:
+            self._construct_prepared_branch(branch)
+
     def _construct_prepared_branch(self, branch: _PreparedBranch) -> None:
-        child = type(self)(*branch.ingredients, name=self.__name__)
+        child = type(self)(name=self.__name__)
+        child._construct_prepared(branch.prepared)
+        self._mount_prepared_child(branch.name, child)
+
+    def _mount_prepared_child(self, branch_name: str, child: "Giso") -> None:
         self.modules.update(child.modules)
         for root in child._archive_roots:
             if root not in self._archive_roots:
                 self._archive_roots.append(root)
         for operation_name, operation in child.operations.items():
             original = getattr(operation, "__giso_original__", operation)
-            self._attach_operation(f"{branch.name}.{operation_name}", original)
+            self._attach_operation(f"{branch_name}.{operation_name}", original)
         for operation_name, value in child.results.history:
-            self.results.add(f"{branch.name}.{operation_name}", value)
+            self.results.add(f"{branch_name}.{operation_name}", value)
 
     @staticmethod
     def _validate_branch_name(name: str) -> None:
