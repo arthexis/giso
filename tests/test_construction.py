@@ -45,13 +45,18 @@ def test_named_single_ingredient_builds_prefixed_branch():
     assert giso.charger.protocol_status() == "protocol"
 
 
-def test_named_list_and_tuple_fold_multiple_ingredients_into_same_branch():
-    from_list = Giso(charger=[diagnostics_status, meter_read])
-    from_tuple = Giso(charger=(diagnostics_status, meter_read))
+@pytest.mark.parametrize(
+    "ingredients",
+    [
+        [diagnostics_status, meter_read],
+        (diagnostics_status, meter_read),
+    ],
+)
+def test_named_collections_fold_multiple_ingredients_into_same_branch(ingredients):
+    giso = Giso(charger=ingredients)
 
-    for giso in (from_list, from_tuple):
-        assert giso.charger.diagnostics_status() == "diagnostics"
-        assert giso.charger.meter_read() == 42
+    assert giso.charger.diagnostics_status() == "diagnostics"
+    assert giso.charger.meter_read() == 42
 
 
 def test_root_ingredients_and_named_branches_can_coexist():
@@ -73,6 +78,16 @@ def test_prepared_ingredients_normalize_list_and_tuple_equally():
 def test_branch_names_must_be_public_python_identifiers(branch_name):
     with pytest.raises(ValueError, match="public Python identifiers"):
         Giso(**{branch_name: protocol_status})
+
+
+def test_keyword_mapping_is_structure_while_positional_mapping_keeps_mapping_fold_semantics():
+    positional = Giso({"protocol": protocol_status})
+    branched = Giso(charger={"protocol": protocol_status})
+
+    assert positional.protocol() == "protocol"
+    assert branched.charger.protocol.protocol_status() == "protocol"
+    assert set(positional.operations) == {"protocol"}
+    assert set(branched.operations) == {"charger.protocol.protocol_status"}
 
 
 def test_nested_mapping_and_explicit_giso_are_equivalent():
