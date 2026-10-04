@@ -6,7 +6,7 @@ from .soap import Giso as SoapGiso
 
 
 class Giso(SoapGiso):
-    """A Giso that materializes discovered WSDL operations as placeholders."""
+    """A Giso that materializes discovered WSDL operations as callables."""
 
     def _fold_soap(self, *args: Any, **kwargs: Any) -> None:
         before = len(self._soap_sources)
@@ -35,7 +35,7 @@ class Giso(SoapGiso):
                 if path in self.operations:
                     raise ValueError(f"Duplicate SOAP operation path: {path}")
 
-            placeholder = self._soap_placeholder(metadata)
+            placeholder = self._soap_placeholder(metadata, source, discovered)
             self._attach_operation(path, placeholder)
             attached = self.operations[path]
             attached.__giso_soap__ = dict(metadata)
@@ -64,7 +64,11 @@ class Giso(SoapGiso):
         }
 
     @staticmethod
-    def _soap_placeholder(metadata: dict[str, str]):
+    def _soap_placeholder(
+        metadata: dict[str, str],
+        source: dict[str, Any] | None = None,
+        discovered: dict[str, Any] | None = None,
+    ):
         def operation(*args: Any, **kwargs: Any) -> Any:
             raise NotImplementedError(
                 "SOAP operation execution is not implemented yet; "
