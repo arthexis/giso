@@ -29,11 +29,23 @@ class Giso(PythonAstGiso):
         return self
 
     def distribution(self, name: str) -> "Giso":
-        """Resolve one installed distribution and fold its import roots."""
+        """Resolve one installed distribution and fold its import roots atomically."""
         resolved = self._resolve_distribution(name)
+        child = type(self)(name=self.__name__)
         for package_name in resolved.packages:
             module = importlib.import_module(package_name)
-            super().fold(module)
+            child.fold(module)
+
+        provenance = {
+            "type": "distribution",
+            "source": f"dist:{resolved.name}",
+            "name": resolved.name,
+            "version": resolved.version,
+            "packages": ",".join(resolved.packages),
+        }
+        if provenance not in child.provenance:
+            child.provenance.append(provenance)
+        self.fold(child)
         return self
 
     @classmethod
