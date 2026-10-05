@@ -142,9 +142,24 @@ The helpers do not create a separate execution engine: AST objects, compiled cod
 
 Function-body code objects that require positional/keyword arguments or closure cells are not treated as standalone fold sources and raise `TypeError`.
 
-## Python packages and archives
+## Python packages, installed distributions, and archives
 
 Importable packages can be folded directly by package object or import name. Package/module hierarchy is preserved, while ordinary imported modules retain flat behavior.
+
+Installed Python distributions can be resolved explicitly by distribution metadata rather than by assuming the packaging name is also an import name:
+
+```python
+g = Giso("dist:example-tools")
+
+h = Giso()
+h.distribution("example-tools")
+```
+
+Distribution lookup uses `importlib.metadata`. Giso resolves the distribution's public top-level import roots, imports each root in deterministic order, and hands every imported package/module back to the normal fold pipeline. Name comparison follows Python packaging normalization, so `Example.Tools`, `example_tools`, and `example-tools` refer to the same distribution identity when metadata maps them together.
+
+Resolution prefers `packages_distributions()`, then `top_level.txt`. As a final conservative fallback, distribution file metadata is used only for top-level `.py` modules and directories that explicitly contain a top-level `__init__.py`; arbitrary data directories are not guessed to be Python packages.
+
+A distribution is folded atomically. If any resolved root fails to import or fold, the target Giso is left unchanged. Successful folds add one provenance record containing the canonical distribution name, installed version, and resolved import roots. That provenance is preserved through ordinary Giso copy and named-branch construction.
 
 Filesystem archives can also be folded. Giso supports `.zip`, `.whl`, `.tar.gz`, and `.tgz`; archives are extracted into a private temporary root and handed back to the normal local folding pipeline. Path traversal and archive links are rejected.
 
@@ -276,6 +291,7 @@ Exhausted sources are discarded. Live iterator state is intentionally not cloned
 - standalone compiled `types.CodeType` objects
 - ordinary imported Python modules
 - imported/importable Python packages
+- installed Python distributions using `dist:<distribution>`
 - `.py` files and Python package directories
 - ordinary directories containing Python files
 - `.zip`, `.whl`, `.tar.gz`, and `.tgz` archives
@@ -292,6 +308,6 @@ Raw Python source strings are not accepted by `fold()`; use `Giso.compile(...)` 
 
 Imported callables from a folded module are ignored; only functions and classes defined by that module are attached. Private package paths are skipped.
 
-`fold()` mutates the existing object and returns the same `Giso`, so notebook-style incremental construction works naturally. Direct resolver methods such as `github()`, `pypi()`, `openapi()`, and `soap()` follow the same fluent convention.
+`fold()` mutates the existing object and returns the same `Giso`, so notebook-style incremental construction works naturally. Direct resolver methods such as `distribution()`, `github()`, `pypi()`, `openapi()`, and `soap()` follow the same fluent convention.
 
 The project intentionally has no third-party runtime dependencies and no CLI, MCP server, deployment machinery, or application-specific integrations. The goal remains narrow: explore a live object that can fold software and described external capability surfaces into one callable namespace.
