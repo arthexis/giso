@@ -146,3 +146,56 @@ def test_code_object_with_free_variables_is_rejected():
 
     with pytest.raises(TypeError, match="free variables"):
         Giso(status.__code__)
+
+
+def test_compile_constructor_builds_giso_from_statement_source():
+    giso = Giso.compile(
+        """
+def math__double(value):
+    return value * 2
+"""
+    )
+
+    assert giso.math.double(7) == 14
+
+
+def test_eval_constructor_builds_giso_from_expression_value():
+    giso = Giso.eval("{'triple': lambda value: value * 3}")
+
+    assert giso.triple(4) == 12
+
+
+def test_compile_and_eval_preserve_custom_giso_name():
+    compiled = Giso.compile("def status(): return 'compiled'", name="compiled_tools")
+    evaluated = Giso.eval("{'status': lambda: 'evaluated'}", name="evaluated_tools")
+
+    assert compiled.__name__ == "compiled_tools"
+    assert evaluated.__name__ == "evaluated_tools"
+
+
+def test_compiled_constructor_result_can_be_mounted_as_named_branch():
+    child = Giso.compile("def status(): return 'charger'")
+    parent = Giso(charger=child)
+
+    assert parent.charger.status() == "charger"
+
+
+def test_compile_and_eval_reject_non_string_inputs():
+    with pytest.raises(TypeError, match="source must be a string"):
+        Giso.compile(ast.parse("pass"))
+    with pytest.raises(TypeError, match="expression must be a string"):
+        Giso.eval(ast.parse("1", mode="eval"))
+
+
+def test_compile_and_eval_propagate_syntax_errors():
+    with pytest.raises(SyntaxError):
+        Giso.compile("def broken(:")
+    with pytest.raises(SyntaxError):
+        Giso.eval("1 +")
+
+
+def test_compile_result_survives_ordinary_copy_semantics():
+    original = Giso.compile("def status(): return 'compiled'")
+    copied = Giso(original)
+
+    assert copied.status() == "compiled"
