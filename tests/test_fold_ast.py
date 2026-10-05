@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import ast
 
+import pytest
+
 from giso import Giso
 
 
@@ -88,3 +90,59 @@ def status():
     giso = Giso(charger=tree)
 
     assert giso.charger.status() == "charger"
+
+
+def test_exec_code_object_folds_definitions_from_synthetic_module():
+    code = compile(
+        """
+def status():
+    return "compiled"
+""",
+        "<compiled-test>",
+        "exec",
+    )
+
+    giso = Giso(code)
+
+    assert giso.status() == "compiled"
+
+
+def test_eval_code_object_folds_returned_value():
+    code = compile("{'double': lambda value: value * 2}", "<compiled-test>", "eval")
+
+    giso = Giso(code)
+
+    assert giso.double(6) == 12
+
+
+def test_code_object_works_inside_named_constructor_branch():
+    code = compile(
+        """
+def status():
+    return "compiled-branch"
+""",
+        "<compiled-branch>",
+        "exec",
+    )
+
+    giso = Giso(charger=code)
+
+    assert giso.charger.status() == "compiled-branch"
+
+
+def test_code_object_requiring_arguments_is_rejected():
+    def status(value):
+        return value
+
+    with pytest.raises(TypeError, match="requiring arguments"):
+        Giso(status.__code__)
+
+
+def test_code_object_with_free_variables_is_rejected():
+    marker = "closed"
+
+    def status():
+        return marker
+
+    with pytest.raises(TypeError, match="free variables"):
+        Giso(status.__code__)
