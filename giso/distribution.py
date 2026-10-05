@@ -55,7 +55,8 @@ class Giso(PythonAstGiso):
 
         requested_name = name.strip()
         dist = metadata.distribution(requested_name)
-        canonical_name = dist.metadata.get("Name") or requested_name
+        metadata_name = dist.metadata.get("Name")
+        canonical_name = requested_name if metadata_name is None else metadata_name
         if not isinstance(canonical_name, str) or not canonical_name.strip():
             raise ValueError(f"Installed distribution {requested_name!r} has no valid name metadata")
         canonical_name = canonical_name.strip()
