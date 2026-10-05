@@ -159,7 +159,7 @@ Distribution lookup uses `importlib.metadata`. Giso resolves the distribution's 
 
 Resolution prefers `packages_distributions()`, then `top_level.txt`. As a final conservative fallback, distribution file metadata is used only for top-level `.py` modules and directories that explicitly contain a top-level `__init__.py`; arbitrary data directories are not guessed to be Python packages.
 
-A distribution is folded atomically. If any resolved root fails to import or fold, the target Giso is left unchanged. Successful folds add one provenance record containing the canonical distribution name, installed version, and resolved import roots. That provenance is preserved through ordinary Giso copy and named-branch construction.
+A distribution is folded atomically. If any resolved root fails to import or fold, the target Giso is left unchanged. Successful folds add one provenance record containing the canonical distribution name, installed version, and resolved import roots. That provenance is preserved through ordinary Giso copy and named-branch construction. Missing distributions propagate `importlib.metadata.PackageNotFoundError`; malformed installed metadata and distributions with no usable import roots fail explicitly.
 
 Filesystem archives can also be folded. Giso supports `.zip`, `.whl`, `.tar.gz`, and `.tgz`; archives are extracted into a private temporary root and handed back to the normal local folding pipeline. Path traversal and archive links are rejected.
 
