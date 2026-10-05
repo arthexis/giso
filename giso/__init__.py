@@ -1,4 +1,4 @@
-from .construction import Giso
+from .python_ast import Giso
 from .core import CapabilityRequest, Namespace, Results, Sigil
 from .soap_envelope import SoapRequest
 from .soap_schema import UnsupportedSoapSchema

@@ -104,6 +104,44 @@ An explicitly nested live `Giso` is retained by reference at that branch boundar
 
 Branch names must be public Python identifiers. `fold()` itself is unchanged; hierarchical naming is constructor syntax rather than a second named-folding API.
 
+## Python AST, compiled code, and source text
+
+Native Python AST objects are foldable sources. `ast.Module` is compiled in `exec` mode into a synthetic module and then follows ordinary module-folding rules. `ast.Expression` is compiled in `eval` mode and the resulting Python value is folded normally.
+
+Standalone compiled `types.CodeType` objects are also foldable. Code produced with `compile(..., mode="exec")` executes in an isolated synthetic module namespace; definitions from that namespace are folded as a module. Code produced with `compile(..., mode="eval")` returns one Python value, which is folded normally.
+
+```python
+import ast
+
+module_tree = ast.parse("""
+def double(value):
+    return value * 2
+""")
+assert Giso(module_tree).double(4) == 8
+
+expression = compile("{'double': lambda value: value * 2}", "<example>", "eval")
+assert Giso(expression).double(5) == 10
+```
+
+Raw Python text is deliberately not interpreted by ordinary `fold()` string dispatch. Use explicit classmethod constructors when text itself is the source:
+
+```python
+g = Giso.compile("""
+def math__double(value):
+    return value * 2
+""")
+assert g.math.double(4) == 8
+
+h = Giso.eval("{'triple': lambda value: value * 3}")
+assert h.triple(4) == 12
+```
+
+`Giso.compile(source)` parses the string as statement/module source and routes the resulting `ast.Module` through the normal AST/code/module folding path. `Giso.eval(expression)` parses one expression and folds the value it produces. Both accept an optional `name=` for the resulting Giso and propagate normal `SyntaxError` failures.
+
+The helpers do not create a separate execution engine: AST objects, compiled code objects, and text helpers all converge on the same fold semantics. A Giso created by `compile()` or `eval()` can therefore be nested beneath a named constructor branch or copied like any other statically materialized Giso.
+
+Function-body code objects that require positional/keyword arguments or closure cells are not treated as standalone fold sources and raise `TypeError`.
+
 ## Python packages and archives
 
 Importable packages can be folded directly by package object or import name. Package/module hierarchy is preserved, while ordinary imported modules retain flat behavior.
@@ -234,6 +272,8 @@ Exhausted sources are discarded. Live iterator state is intentionally not cloned
 - Python callables and classes
 - configured Python object instances
 - mappings/dictionaries of foldable capabilities
+- native `ast.Module` and `ast.Expression` objects
+- standalone compiled `types.CodeType` objects
 - ordinary imported Python modules
 - imported/importable Python packages
 - `.py` files and Python package directories
@@ -247,6 +287,8 @@ Exhausted sources are discarded. Live iterator state is intentionally not cloned
 - finite-looking `Sized` iterables
 - deferred iterators/generators
 - another `Giso`
+
+Raw Python source strings are not accepted by `fold()`; use `Giso.compile(...)` or `Giso.eval(...)` explicitly.
 
 Imported callables from a folded module are ignored; only functions and classes defined by that module are attached. Private package paths are skipped.
 
