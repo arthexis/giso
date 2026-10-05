@@ -27,6 +27,16 @@ def module_with_status(name, value):
     return module
 
 
+def patch_distribution(monkeypatch, *, dist=None, modules=None, packages=None):
+    dist = dist or FakeDistribution()
+    modules = modules or {"example_tools": module_with_status("example_tools", "ready")}
+    packages = packages or {"example_tools": [dist.metadata["Name"]]}
+    monkeypatch.setattr(distribution_module.metadata, "distribution", lambda name: dist)
+    monkeypatch.setattr(distribution_module.metadata, "packages_distributions", lambda: packages)
+    monkeypatch.setattr(distribution_module.importlib, "import_module", modules.__getitem__)
+    return dist
+
+
 def test_distribution_resolves_packages_from_packages_distributions(monkeypatch):
     dist = FakeDistribution()
     monkeypatch.setattr(distribution_module.metadata, "distribution", lambda name: dist)
@@ -84,15 +94,7 @@ def test_distribution_rejects_missing_import_roots(monkeypatch):
 
 
 def test_distribution_direct_method_uses_existing_module_fold(monkeypatch):
-    dist = FakeDistribution()
-    modules = {"example_tools": module_with_status("example_tools", "ready")}
-    monkeypatch.setattr(distribution_module.metadata, "distribution", lambda name: dist)
-    monkeypatch.setattr(
-        distribution_module.metadata,
-        "packages_distributions",
-        lambda: {"example_tools": ["Example-Tools"]},
-    )
-    monkeypatch.setattr(distribution_module.importlib, "import_module", modules.__getitem__)
+    patch_distribution(monkeypatch)
 
     giso = Giso().distribution("example-tools")
 
@@ -100,15 +102,8 @@ def test_distribution_direct_method_uses_existing_module_fold(monkeypatch):
 
 
 def test_dist_string_routes_to_distribution_resolver(monkeypatch):
-    dist = FakeDistribution()
     modules = {"example_tools": module_with_status("example_tools", "resolved")}
-    monkeypatch.setattr(distribution_module.metadata, "distribution", lambda name: dist)
-    monkeypatch.setattr(
-        distribution_module.metadata,
-        "packages_distributions",
-        lambda: {"example_tools": ["Example-Tools"]},
-    )
-    monkeypatch.setattr(distribution_module.importlib, "import_module", modules.__getitem__)
+    patch_distribution(monkeypatch, modules=modules)
 
     giso = Giso("dist:example-tools")
 
@@ -121,16 +116,11 @@ def test_distribution_records_canonical_provenance_once(monkeypatch):
         "example_helpers": module_with_status("example_helpers", "helpers"),
         "example_tools": module_with_status("example_tools", "tools"),
     }
-    monkeypatch.setattr(distribution_module.metadata, "distribution", lambda name: dist)
-    monkeypatch.setattr(
-        distribution_module.metadata,
-        "packages_distributions",
-        lambda: {
-            "example_helpers": ["example_tools"],
-            "example_tools": ["Example.Tools"],
-        },
-    )
-    monkeypatch.setattr(distribution_module.importlib, "import_module", modules.__getitem__)
+    packages = {
+        "example_helpers": ["example_tools"],
+        "example_tools": ["Example.Tools"],
+    }
+    patch_distribution(monkeypatch, dist=dist, modules=modules, packages=packages)
 
     giso = Giso().distribution("example_tools")
 
@@ -146,21 +136,15 @@ def test_distribution_records_canonical_provenance_once(monkeypatch):
 
 
 def test_distribution_multi_root_order_matches_resolved_package_order(monkeypatch):
-    dist = FakeDistribution()
     modules = {
         "example_helpers": module_with_status("example_helpers", "helpers"),
         "example_tools": module_with_status("example_tools", "tools"),
     }
-    monkeypatch.setattr(distribution_module.metadata, "distribution", lambda name: dist)
-    monkeypatch.setattr(
-        distribution_module.metadata,
-        "packages_distributions",
-        lambda: {
-            "example_tools": ["Example-Tools"],
-            "example_helpers": ["Example-Tools"],
-        },
-    )
-    monkeypatch.setattr(distribution_module.importlib, "import_module", modules.__getitem__)
+    packages = {
+        "example_tools": ["Example-Tools"],
+        "example_helpers": ["Example-Tools"],
+    }
+    patch_distribution(monkeypatch, modules=modules, packages=packages)
 
     giso = Giso().distribution("example-tools")
 
@@ -193,6 +177,16 @@ def test_distribution_failure_does_not_partially_mutate_target(monkeypatch):
 
     assert "status" not in giso.operations
     assert giso.provenance == []
+
+
+def test_distribution_provenance_survives_giso_copy(monkeypatch):
+    patch_distribution(monkeypatch)
+    original = Giso().distribution("example-tools")
+
+    copied = Giso(original)
+
+    assert copied.status() == "ready"
+    assert copied.provenance == original.provenance
 
 
 def test_distribution_name_must_be_non_empty():
