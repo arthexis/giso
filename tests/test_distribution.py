@@ -235,6 +235,16 @@ def test_distribution_provenance_survives_giso_copy(monkeypatch):
     assert copied.provenance == original.provenance
 
 
+def test_missing_distribution_error_propagates(monkeypatch):
+    def missing(name):
+        raise distribution_module.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(distribution_module.metadata, "distribution", missing)
+
+    with pytest.raises(distribution_module.metadata.PackageNotFoundError):
+        Giso().distribution("missing-project")
+
+
 def test_distribution_name_must_be_non_empty():
     with pytest.raises(TypeError, match="non-empty string"):
         Giso._resolve_distribution("")
