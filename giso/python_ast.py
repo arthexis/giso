@@ -12,6 +12,20 @@ from .construction import Giso as ConstructionGiso
 class Giso(ConstructionGiso):
     """A Giso that can fold native Python AST and compiled code objects."""
 
+    @classmethod
+    def compile(cls, source: str, *, name: str = "giso") -> "Giso":
+        """Build a Giso from Python statement/module source text."""
+        if not isinstance(source, str):
+            raise TypeError("Giso.compile() source must be a string")
+        return cls(ast.parse(source, mode="exec"), name=name)
+
+    @classmethod
+    def eval(cls, expression: str, *, name: str = "giso") -> "Giso":
+        """Build a Giso from one Python expression and fold its resulting value."""
+        if not isinstance(expression, str):
+            raise TypeError("Giso.eval() expression must be a string")
+        return cls(ast.parse(expression, mode="eval"), name=name)
+
     def fold(self, *sources: Any) -> "Giso":
         for source in self._flatten(sources):
             if source is None:
