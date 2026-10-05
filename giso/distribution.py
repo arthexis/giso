@@ -53,8 +53,18 @@ class Giso(PythonAstGiso):
         if not isinstance(name, str) or not name.strip():
             raise TypeError("Distribution name must be a non-empty string")
 
-        dist = metadata.distribution(name.strip())
-        canonical_name = dist.metadata.get("Name") or name.strip()
+        requested_name = name.strip()
+        dist = metadata.distribution(requested_name)
+        canonical_name = dist.metadata.get("Name") or requested_name
+        if not isinstance(canonical_name, str) or not canonical_name.strip():
+            raise ValueError(f"Installed distribution {requested_name!r} has no valid name metadata")
+        canonical_name = canonical_name.strip()
+
+        version = dist.version
+        if not isinstance(version, str) or not version.strip():
+            raise ValueError(f"Installed distribution {canonical_name!r} has no valid version metadata")
+        version = version.strip()
+
         packages = cls._distribution_packages(dist, canonical_name)
         if not packages:
             raise ValueError(
@@ -62,7 +72,7 @@ class Giso(PythonAstGiso):
             )
         return _ResolvedDistribution(
             name=canonical_name,
-            version=dist.version,
+            version=version,
             packages=packages,
         )
 
@@ -76,7 +86,8 @@ class Giso(PythonAstGiso):
         discovered = {
             package
             for package, distributions in metadata.packages_distributions().items()
-            if any(cls._normalize_distribution_name(item) == expected for item in distributions)
+            if cls._is_import_root(package)
+            and any(cls._normalize_distribution_name(item) == expected for item in distributions)
         }
         if discovered:
             return tuple(sorted(discovered))
@@ -91,8 +102,9 @@ class Giso(PythonAstGiso):
             if names:
                 return tuple(sorted(names))
 
+        files = tuple(dist.files or ())
         names: set[str] = set()
-        for file in dist.files or ():
+        for file in files:
             path = pathlib.PurePosixPath(str(file))
             if not path.parts:
                 continue
@@ -100,8 +112,15 @@ class Giso(PythonAstGiso):
             if root.endswith((".dist-info", ".egg-info", ".data")):
                 continue
             if len(path.parts) == 1 and root.endswith(".py"):
-                root = root[:-3]
-            if cls._is_import_root(root):
+                module_name = root[:-3]
+                if cls._is_import_root(module_name):
+                    names.add(module_name)
+                continue
+            if (
+                len(path.parts) == 2
+                and path.parts[1] == "__init__.py"
+                and cls._is_import_root(root)
+            ):
                 names.add(root)
         return tuple(sorted(names))
 
