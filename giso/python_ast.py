@@ -2,14 +2,15 @@ from __future__ import annotations
 
 import ast
 import hashlib
-from types import ModuleType
+import marshal
+from types import CodeType, ModuleType
 from typing import Any
 
 from .construction import Giso as ConstructionGiso
 
 
 class Giso(ConstructionGiso):
-    """A Giso that can fold native Python AST objects."""
+    """A Giso that can fold native Python AST and compiled code objects."""
 
     def fold(self, *sources: Any) -> "Giso":
         for source in self._flatten(sources):
@@ -19,6 +20,8 @@ class Giso(ConstructionGiso):
                 self._fold_ast_module(source)
             elif isinstance(source, ast.Expression):
                 self._fold_ast_expression(source)
+            elif isinstance(source, CodeType):
+                self._fold_code(source)
             else:
                 super().fold(source)
         return self
@@ -26,23 +29,39 @@ class Giso(ConstructionGiso):
     def _fold_ast_module(self, tree: ast.Module) -> None:
         tree = ast.fix_missing_locations(tree)
         identity = self._ast_identity(tree)
-        module_name = f"_giso_ast_{identity}"
         filename = f"<giso-ast:{identity}>"
-        module = ModuleType(module_name)
-        module.__file__ = filename
         code = compile(tree, filename, "exec")
-        exec(code, module.__dict__)
-        self._fold_imported_module(module)
+        self._fold_code(code, identity=identity)
 
     def _fold_ast_expression(self, tree: ast.Expression) -> None:
         tree = ast.fix_missing_locations(tree)
         identity = self._ast_identity(tree)
         filename = f"<giso-ast:{identity}>"
         code = compile(tree, filename, "eval")
-        value = eval(code, {"__builtins__": __builtins__})
-        self.fold(value)
+        self._fold_code(code, identity=identity)
+
+    def _fold_code(self, code: CodeType, *, identity: str | None = None) -> None:
+        if code.co_argcount or code.co_posonlyargcount or code.co_kwonlyargcount:
+            raise TypeError("Code objects requiring arguments are not standalone fold sources")
+        if code.co_freevars:
+            raise TypeError("Code objects with free variables are not standalone fold sources")
+
+        identity = identity or self._code_identity(code)
+        module_name = f"_giso_code_{identity}"
+        filename = code.co_filename or f"<giso-code:{identity}>"
+        module = ModuleType(module_name)
+        module.__file__ = filename
+        value = eval(code, module.__dict__)
+        if value is None:
+            self._fold_imported_module(module)
+        else:
+            self.fold(value)
 
     @staticmethod
     def _ast_identity(tree: ast.AST) -> str:
         serialized = ast.dump(tree, annotate_fields=True, include_attributes=False)
         return hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:16]
+
+    @staticmethod
+    def _code_identity(code: CodeType) -> str:
+        return hashlib.sha256(marshal.dumps(code)).hexdigest()[:16]
