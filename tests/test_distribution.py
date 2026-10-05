@@ -46,6 +46,8 @@ def test_distribution_resolves_packages_from_packages_distributions(monkeypatch)
         lambda: {
             "example_tools": ["example_tools"],
             "example_helpers": ["Example.Tools"],
+            "_private": ["Example-Tools"],
+            "not-valid": ["Example-Tools"],
             "other": ["something-else"],
         },
     )
@@ -71,9 +73,11 @@ def test_distribution_falls_back_to_distribution_files(monkeypatch):
     dist = FakeDistribution(
         files=(
             "example_tools/__init__.py",
+            "example_tools/api.py",
             "example_helpers.py",
             "Example_Tools-1.2.3.dist-info/METADATA",
-            "data-file.txt",
+            "assets/data.py",
+            "data_file.txt",
         )
     )
     monkeypatch.setattr(distribution_module.metadata, "distribution", lambda name: dist)
@@ -84,12 +88,37 @@ def test_distribution_falls_back_to_distribution_files(monkeypatch):
     assert resolved.packages == ("example_helpers", "example_tools")
 
 
+def test_distribution_file_fallback_does_not_guess_data_directories(monkeypatch):
+    dist = FakeDistribution(files=("assets/data.py", "templates/page.py"))
+    monkeypatch.setattr(distribution_module.metadata, "distribution", lambda name: dist)
+    monkeypatch.setattr(distribution_module.metadata, "packages_distributions", lambda: {})
+
+    with pytest.raises(ValueError, match="exposes no importable"):
+        Giso._resolve_distribution("example-tools")
+
+
 def test_distribution_rejects_missing_import_roots(monkeypatch):
     dist = FakeDistribution(files=("Example_Tools-1.2.3.dist-info/METADATA",))
     monkeypatch.setattr(distribution_module.metadata, "distribution", lambda name: dist)
     monkeypatch.setattr(distribution_module.metadata, "packages_distributions", lambda: {})
 
     with pytest.raises(ValueError, match="exposes no importable"):
+        Giso._resolve_distribution("example-tools")
+
+
+def test_distribution_rejects_invalid_name_metadata(monkeypatch):
+    dist = FakeDistribution(name="")
+    monkeypatch.setattr(distribution_module.metadata, "distribution", lambda name: dist)
+
+    with pytest.raises(ValueError, match="valid name metadata"):
+        Giso._resolve_distribution("example-tools")
+
+
+def test_distribution_rejects_invalid_version_metadata(monkeypatch):
+    dist = FakeDistribution(version="")
+    monkeypatch.setattr(distribution_module.metadata, "distribution", lambda name: dist)
+
+    with pytest.raises(ValueError, match="valid version metadata"):
         Giso._resolve_distribution("example-tools")
 
 
@@ -108,6 +137,23 @@ def test_dist_string_routes_to_distribution_resolver(monkeypatch):
     giso = Giso("dist:example-tools")
 
     assert giso.status() == "resolved"
+
+
+def test_distribution_works_inside_named_constructor_branch(monkeypatch):
+    patch_distribution(monkeypatch)
+
+    giso = Giso(tools="dist:example-tools")
+
+    assert giso.tools.status() == "ready"
+    assert giso.provenance == [
+        {
+            "type": "distribution",
+            "source": "dist:Example-Tools",
+            "name": "Example-Tools",
+            "version": "1.2.3",
+            "packages": "example_tools",
+        }
+    ]
 
 
 def test_distribution_records_canonical_provenance_once(monkeypatch):
