@@ -27,29 +27,55 @@ def module_with_status(name, value):
     return module
 
 
-def patch_distribution(monkeypatch, *, dist=None, modules=None, packages=None):
-    dist = dist or FakeDistribution()
-    modules = modules or {"example_tools": module_with_status("example_tools", "ready")}
-    packages = packages or {"example_tools": [dist.metadata["Name"]]}
-    monkeypatch.setattr(distribution_module.metadata, "distribution", lambda name: dist)
-    monkeypatch.setattr(distribution_module.metadata, "packages_distributions", lambda: packages)
-    monkeypatch.setattr(distribution_module.importlib, "import_module", modules.__getitem__)
-    return dist
+def distribution_provenance(*packages):
+    return {
+        "type": "distribution",
+        "source": "dist:Example-Tools",
+        "name": "Example-Tools",
+        "version": "1.2.3",
+        "packages": ",".join(packages),
+    }
 
 
-def test_distribution_resolves_packages_from_packages_distributions(monkeypatch):
-    dist = FakeDistribution()
-    monkeypatch.setattr(distribution_module.metadata, "distribution", lambda name: dist)
-    monkeypatch.setattr(
-        distribution_module.metadata,
-        "packages_distributions",
-        lambda: {
+class DistributionHarness:
+    def __init__(self, monkeypatch):
+        self.monkeypatch = monkeypatch
+
+    def metadata(self, *, dist=None, packages=None):
+        dist = dist or FakeDistribution()
+        packages = packages if packages is not None else {"example_tools": [dist.metadata["Name"]]}
+        self.monkeypatch.setattr(distribution_module.metadata, "distribution", lambda name: dist)
+        self.monkeypatch.setattr(
+            distribution_module.metadata,
+            "packages_distributions",
+            lambda: packages,
+        )
+        return dist
+
+    def imports(self, modules):
+        self.monkeypatch.setattr(distribution_module.importlib, "import_module", modules.__getitem__)
+
+    def installed(self, *, dist=None, packages=None, modules=None):
+        dist = self.metadata(dist=dist, packages=packages)
+        modules = modules or {"example_tools": module_with_status("example_tools", "ready")}
+        self.imports(modules)
+        return dist
+
+
+@pytest.fixture
+def distribution(monkeypatch):
+    return DistributionHarness(monkeypatch)
+
+
+def test_distribution_resolves_packages_from_packages_distributions(distribution):
+    distribution.metadata(
+        packages={
             "example_tools": ["example_tools"],
             "example_helpers": ["Example.Tools"],
             "_private": ["Example-Tools"],
             "not-valid": ["Example-Tools"],
             "other": ["something-else"],
-        },
+        }
     )
 
     resolved = Giso._resolve_distribution("example-tools")
@@ -59,146 +85,128 @@ def test_distribution_resolves_packages_from_packages_distributions(monkeypatch)
     assert resolved.packages == ("example_helpers", "example_tools")
 
 
-def test_distribution_falls_back_to_top_level_metadata(monkeypatch):
-    dist = FakeDistribution(top_level="example_tools\nexample_helpers\n_private\nnot-valid\n")
-    monkeypatch.setattr(distribution_module.metadata, "distribution", lambda name: dist)
-    monkeypatch.setattr(distribution_module.metadata, "packages_distributions", lambda: {})
+def test_distribution_falls_back_to_top_level_metadata(distribution):
+    distribution.metadata(
+        dist=FakeDistribution(top_level="example_tools\nexample_helpers\n_private\nnot-valid\n"),
+        packages={},
+    )
 
     resolved = Giso._resolve_distribution("Example.Tools")
 
     assert resolved.packages == ("example_helpers", "example_tools")
 
 
-def test_distribution_falls_back_to_distribution_files(monkeypatch):
-    dist = FakeDistribution(
-        files=(
-            "example_tools/__init__.py",
-            "example_tools/api.py",
-            "example_helpers.py",
-            "Example_Tools-1.2.3.dist-info/METADATA",
-            "assets/data.py",
-            "data_file.txt",
-        )
+def test_distribution_falls_back_to_distribution_files(distribution):
+    distribution.metadata(
+        dist=FakeDistribution(
+            files=(
+                "example_tools/__init__.py",
+                "example_tools/api.py",
+                "example_helpers.py",
+                "Example_Tools-1.2.3.dist-info/METADATA",
+                "assets/data.py",
+                "data_file.txt",
+            )
+        ),
+        packages={},
     )
-    monkeypatch.setattr(distribution_module.metadata, "distribution", lambda name: dist)
-    monkeypatch.setattr(distribution_module.metadata, "packages_distributions", lambda: {})
 
     resolved = Giso._resolve_distribution("example-tools")
 
     assert resolved.packages == ("example_helpers", "example_tools")
 
 
-def test_distribution_file_fallback_does_not_guess_data_directories(monkeypatch):
-    dist = FakeDistribution(files=("assets/data.py", "templates/page.py"))
-    monkeypatch.setattr(distribution_module.metadata, "distribution", lambda name: dist)
-    monkeypatch.setattr(distribution_module.metadata, "packages_distributions", lambda: {})
+@pytest.mark.parametrize(
+    "files",
+    [
+        ("assets/data.py", "templates/page.py"),
+        ("Example_Tools-1.2.3.dist-info/METADATA",),
+    ],
+)
+def test_distribution_file_fallback_rejects_non_packages(distribution, files):
+    distribution.metadata(dist=FakeDistribution(files=files), packages={})
 
     with pytest.raises(ValueError, match="exposes no importable"):
         Giso._resolve_distribution("example-tools")
 
 
-def test_distribution_rejects_missing_import_roots(monkeypatch):
-    dist = FakeDistribution(files=("Example_Tools-1.2.3.dist-info/METADATA",))
-    monkeypatch.setattr(distribution_module.metadata, "distribution", lambda name: dist)
-    monkeypatch.setattr(distribution_module.metadata, "packages_distributions", lambda: {})
+@pytest.mark.parametrize(
+    ("dist", "message"),
+    [
+        (FakeDistribution(name=""), "valid name metadata"),
+        (FakeDistribution(version=""), "valid version metadata"),
+    ],
+)
+def test_distribution_rejects_malformed_metadata(distribution, dist, message):
+    distribution.metadata(dist=dist)
 
-    with pytest.raises(ValueError, match="exposes no importable"):
+    with pytest.raises(ValueError, match=message):
         Giso._resolve_distribution("example-tools")
 
 
-def test_distribution_rejects_invalid_name_metadata(monkeypatch):
-    dist = FakeDistribution(name="")
-    monkeypatch.setattr(distribution_module.metadata, "distribution", lambda name: dist)
+def test_distribution_direct_method_uses_existing_module_fold(distribution):
+    distribution.installed()
 
-    with pytest.raises(ValueError, match="valid name metadata"):
-        Giso._resolve_distribution("example-tools")
+    assert Giso().distribution("example-tools").status() == "ready"
 
 
-def test_distribution_rejects_invalid_version_metadata(monkeypatch):
-    dist = FakeDistribution(version="")
-    monkeypatch.setattr(distribution_module.metadata, "distribution", lambda name: dist)
+def test_dist_string_routes_to_distribution_resolver(distribution):
+    distribution.installed(
+        modules={"example_tools": module_with_status("example_tools", "resolved")}
+    )
 
-    with pytest.raises(ValueError, match="valid version metadata"):
-        Giso._resolve_distribution("example-tools")
-
-
-def test_distribution_direct_method_uses_existing_module_fold(monkeypatch):
-    patch_distribution(monkeypatch)
-
-    giso = Giso().distribution("example-tools")
-
-    assert giso.status() == "ready"
+    assert Giso("dist:example-tools").status() == "resolved"
 
 
-def test_dist_string_routes_to_distribution_resolver(monkeypatch):
-    modules = {"example_tools": module_with_status("example_tools", "resolved")}
-    patch_distribution(monkeypatch, modules=modules)
-
-    giso = Giso("dist:example-tools")
-
-    assert giso.status() == "resolved"
-
-
-def test_distribution_works_inside_named_constructor_branch(monkeypatch):
-    patch_distribution(monkeypatch)
+def test_distribution_works_inside_named_constructor_branch(distribution):
+    distribution.installed()
 
     giso = Giso(tools="dist:example-tools")
 
     assert giso.tools.status() == "ready"
-    assert giso.provenance == [
-        {
-            "type": "distribution",
-            "source": "dist:Example-Tools",
-            "name": "Example-Tools",
-            "version": "1.2.3",
-            "packages": "example_tools",
-        }
-    ]
+    assert giso.provenance == [distribution_provenance("example_tools")]
 
 
-def test_distribution_records_canonical_provenance_once(monkeypatch):
-    dist = FakeDistribution(name="Example-Tools", version="1.2.3")
-    modules = {
-        "example_helpers": module_with_status("example_helpers", "helpers"),
-        "example_tools": module_with_status("example_tools", "tools"),
-    }
+def test_distribution_records_canonical_provenance_once(distribution):
     packages = {
         "example_helpers": ["example_tools"],
         "example_tools": ["Example.Tools"],
     }
-    patch_distribution(monkeypatch, dist=dist, modules=modules, packages=packages)
-
-    giso = Giso().distribution("example_tools")
-
-    assert giso.provenance == [
-        {
-            "type": "distribution",
-            "source": "dist:Example-Tools",
-            "name": "Example-Tools",
-            "version": "1.2.3",
-            "packages": "example_helpers,example_tools",
-        }
-    ]
-
-
-def test_distribution_multi_root_order_matches_resolved_package_order(monkeypatch):
     modules = {
         "example_helpers": module_with_status("example_helpers", "helpers"),
         "example_tools": module_with_status("example_tools", "tools"),
     }
-    packages = {
-        "example_tools": ["Example-Tools"],
-        "example_helpers": ["Example-Tools"],
-    }
-    patch_distribution(monkeypatch, modules=modules, packages=packages)
+    distribution.installed(packages=packages, modules=modules)
 
-    giso = Giso().distribution("example-tools")
+    giso = Giso().distribution("example_tools")
 
-    assert giso.status() == "tools"
+    assert giso.provenance == [
+        distribution_provenance("example_helpers", "example_tools")
+    ]
 
 
-def test_distribution_failure_does_not_partially_mutate_target(monkeypatch):
-    dist = FakeDistribution()
+def test_distribution_multi_root_order_matches_resolved_package_order(distribution):
+    distribution.installed(
+        packages={
+            "example_tools": ["Example-Tools"],
+            "example_helpers": ["Example-Tools"],
+        },
+        modules={
+            "example_helpers": module_with_status("example_helpers", "helpers"),
+            "example_tools": module_with_status("example_tools", "tools"),
+        },
+    )
+
+    assert Giso().distribution("example-tools").status() == "tools"
+
+
+def test_distribution_failure_does_not_partially_mutate_target(distribution, monkeypatch):
+    distribution.metadata(
+        packages={
+            "example_helpers": ["Example-Tools"],
+            "example_tools": ["Example-Tools"],
+        }
+    )
     first = module_with_status("example_helpers", "helpers")
 
     def import_module(name):
@@ -206,15 +214,6 @@ def test_distribution_failure_does_not_partially_mutate_target(monkeypatch):
             return first
         raise ImportError("boom")
 
-    monkeypatch.setattr(distribution_module.metadata, "distribution", lambda name: dist)
-    monkeypatch.setattr(
-        distribution_module.metadata,
-        "packages_distributions",
-        lambda: {
-            "example_helpers": ["Example-Tools"],
-            "example_tools": ["Example-Tools"],
-        },
-    )
     monkeypatch.setattr(distribution_module.importlib, "import_module", import_module)
 
     giso = Giso()
@@ -225,8 +224,8 @@ def test_distribution_failure_does_not_partially_mutate_target(monkeypatch):
     assert giso.provenance == []
 
 
-def test_distribution_provenance_survives_giso_copy(monkeypatch):
-    patch_distribution(monkeypatch)
+def test_distribution_provenance_survives_giso_copy(distribution):
+    distribution.installed()
     original = Giso().distribution("example-tools")
 
     copied = Giso(original)
