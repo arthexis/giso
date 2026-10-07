@@ -2030,3 +2030,312 @@ def test_mcp_completion_surfaces_rpc_error(monkeypatch):
 
     with pytest.raises(mcp_module.McpExecutionError, match="invalid completion"):
         giso.prompts.code_review.complete("language", "p")
+
+
+class FakeSubscriptionStream:
+    def __init__(self, messages):
+        self.lines = []
+        for message in messages:
+            self.lines.extend(
+                [
+                    "event: message\n",
+                    f"data: {mcp_module.json.dumps(message)}\n",
+                    "\n",
+                ]
+            )
+        self.closed = False
+        self.headers = {"Content-Type": "text/event-stream"}
+
+    def readline(self):
+        if not self.lines:
+            return ""
+        return self.lines.pop(0)
+
+    def close(self):
+        self.closed = True
+
+
+def subscription_message(method, *, params=None, subscription_id=300):
+    payload = dict(params or {})
+    meta = payload.get("_meta")
+    if not isinstance(meta, dict):
+        meta = {}
+    payload["_meta"] = {
+        **meta,
+        "io.modelcontextprotocol/subscriptionId": subscription_id,
+    }
+    return {
+        "jsonrpc": "2.0",
+        "method": method,
+        "params": payload,
+    }
+
+
+def subscription_giso(monkeypatch, messages):
+    def handler(payload, headers, allow_empty):
+        method = payload["method"]
+        if method == "server/discover":
+            result = modern_discover()
+            result["result"]["capabilities"] = {
+                "tools": {"listChanged": True},
+                "prompts": {"listChanged": True},
+                "resources": {"listChanged": True, "subscribe": True},
+            }
+            return response(result)
+        if method == "tools/list":
+            return response(rpc_result(payload["id"], {"tools": [tool()]}))
+        if method == "prompts/list":
+            return response(rpc_result(payload["id"], {"prompts": [prompt()]}))
+        if method == "resources/templates/list":
+            return response(rpc_result(payload["id"], {"resourceTemplates": []}))
+        if method == "resources/list":
+            return response(rpc_result(payload["id"], {"resources": [resource()]}))
+        raise AssertionError(payload)
+
+    McpHttpHarness(monkeypatch, handler)
+    stream = FakeSubscriptionStream(messages)
+
+    def open_stream(cls, endpoint, payload, *, headers):
+        assert payload["method"] == "subscriptions/listen"
+        assert headers["Mcp-Method"] == "subscriptions/listen"
+        assert headers["MCP-Protocol-Version"] == mcp_module.MODERN_PROTOCOL_VERSION
+        open_stream.payload = payload
+        return stream
+
+    monkeypatch.setattr(
+        Giso,
+        "_open_mcp_subscription_stream",
+        classmethod(open_stream),
+    )
+    return Giso().mcp(ENDPOINT), stream, open_stream
+
+
+def test_mcp_subscription_listens_for_advertised_list_changes(monkeypatch):
+    acknowledged = subscription_message(
+        "notifications/subscriptions/acknowledged",
+        params={
+            "notifications": {
+                "toolsListChanged": True,
+                "promptsListChanged": True,
+                "resourcesListChanged": True,
+            }
+        },
+    )
+    event_message = subscription_message("notifications/tools/list_changed")
+    giso, stream, opener = subscription_giso(
+        monkeypatch,
+        [acknowledged, event_message],
+    )
+
+    subscription = giso.subscribe(
+        tools=True,
+        prompts=True,
+        resources=True,
+    )
+
+    notifications = opener.payload["params"]["notifications"]
+    assert notifications == {
+        "toolsListChanged": True,
+        "promptsListChanged": True,
+        "resourcesListChanged": True,
+    }
+    assert subscription.acknowledged == notifications
+
+    event = subscription.next()
+    assert event.method == "notifications/tools/list_changed"
+    assert event.subscription_id == 300
+    assert event.resource_uri is None
+    assert not stream.closed
+
+
+def test_mcp_subscription_supports_resource_updates(monkeypatch):
+    acknowledged = subscription_message(
+        "notifications/subscriptions/acknowledged",
+        params={
+            "notifications": {
+                "resourceSubscriptions": ["file:///project/main.txt"],
+            }
+        },
+    )
+    updated = subscription_message(
+        "notifications/resources/updated",
+        params={"uri": "file:///project/main.txt"},
+    )
+    giso, _, opener = subscription_giso(monkeypatch, [acknowledged, updated])
+
+    subscription = giso.subscribe(
+        resource_uris=("file:///project/main.txt",),
+    )
+    event = subscription.next()
+
+    assert opener.payload["params"]["notifications"] == {
+        "resourceSubscriptions": ["file:///project/main.txt"]
+    }
+    assert event.method == "notifications/resources/updated"
+    assert event.resource_uri == "file:///project/main.txt"
+
+
+def test_mcp_subscription_filters_unsupported_list_change_requests(monkeypatch):
+    def handler(payload, headers, allow_empty):
+        if payload["method"] == "server/discover":
+            result = modern_discover()
+            result["result"]["capabilities"] = {
+                "tools": {"listChanged": True},
+                "prompts": {},
+            }
+            return response(result)
+        if payload["method"] == "tools/list":
+            return response(rpc_result(payload["id"], {"tools": [tool()]}))
+        if payload["method"] == "prompts/list":
+            return response(rpc_result(payload["id"], {"prompts": [prompt()]}))
+        raise AssertionError(payload)
+
+    McpHttpHarness(monkeypatch, handler)
+    stream = FakeSubscriptionStream([
+        subscription_message(
+            "notifications/subscriptions/acknowledged",
+            params={"notifications": {"toolsListChanged": True}},
+        )
+    ])
+
+    def open_stream(cls, endpoint, payload, *, headers):
+        open_stream.payload = payload
+        return stream
+
+    monkeypatch.setattr(
+        Giso,
+        "_open_mcp_subscription_stream",
+        classmethod(open_stream),
+    )
+    giso = Giso().mcp(ENDPOINT)
+
+    subscription = giso.subscribe(tools=True, prompts=True)
+
+    assert open_stream.payload["params"]["notifications"] == {
+        "toolsListChanged": True
+    }
+    assert subscription.acknowledged == {"toolsListChanged": True}
+
+
+def test_mcp_subscription_requires_requested_server_capability(monkeypatch):
+    modern_harness(monkeypatch)
+    giso = Giso().mcp(ENDPOINT)
+
+    with pytest.raises(McpInspectionError, match="supports none"):
+        giso.subscribe(tools=True)
+
+
+def test_mcp_resource_subscription_requires_subscribe_capability(monkeypatch):
+    def handler(payload, headers, allow_empty):
+        if payload["method"] == "server/discover":
+            result = modern_discover()
+            result["result"]["capabilities"] = {
+                "resources": {"listChanged": True},
+            }
+            return response(result)
+        if payload["method"] == "tools/list":
+            return response(rpc_result(payload["id"], {"tools": []}))
+        if payload["method"] == "resources/templates/list":
+            return response(rpc_result(payload["id"], {"resourceTemplates": []}))
+        if payload["method"] == "resources/list":
+            return response(rpc_result(payload["id"], {"resources": [resource()]}))
+        raise AssertionError(payload)
+
+    McpHttpHarness(monkeypatch, handler)
+    giso = Giso().mcp(ENDPOINT)
+
+    with pytest.raises(McpInspectionError, match="does not support resource subscriptions"):
+        giso.subscribe(resource_uris=("file:///project/main.txt",))
+
+
+def test_mcp_subscription_requires_acknowledgement_first(monkeypatch):
+    giso, stream, _ = subscription_giso(
+        monkeypatch,
+        [subscription_message("notifications/tools/list_changed")],
+    )
+
+    with pytest.raises(McpExecutionError, match="not acknowledged"):
+        giso.subscribe(tools=True)
+
+    assert stream.closed
+
+
+def test_mcp_subscription_rejects_wrong_subscription_id(monkeypatch):
+    acknowledged = subscription_message(
+        "notifications/subscriptions/acknowledged",
+        params={"notifications": {"toolsListChanged": True}},
+    )
+    event_message = subscription_message(
+        "notifications/tools/list_changed",
+        subscription_id=999,
+    )
+    giso, _, _ = subscription_giso(
+        monkeypatch,
+        [acknowledged, event_message],
+    )
+    subscription = giso.subscribe(tools=True)
+
+    with pytest.raises(McpExecutionError, match="wrong subscriptionId"):
+        subscription.next()
+
+
+def test_mcp_subscription_server_cancellation_closes_handle(monkeypatch):
+    acknowledged = subscription_message(
+        "notifications/subscriptions/acknowledged",
+        params={"notifications": {"toolsListChanged": True}},
+    )
+    cancelled = subscription_message(
+        "notifications/cancelled",
+        params={"requestId": 300, "reason": "server shutdown"},
+    )
+    giso, _, _ = subscription_giso(monkeypatch, [acknowledged, cancelled])
+    subscription = giso.subscribe(tools=True)
+
+    event = subscription.next()
+
+    assert event.method == "notifications/cancelled"
+    assert subscription.closed
+
+
+def test_mcp_subscription_close_closes_stream(monkeypatch):
+    acknowledged = subscription_message(
+        "notifications/subscriptions/acknowledged",
+        params={"notifications": {"toolsListChanged": True}},
+    )
+    giso, stream, _ = subscription_giso(monkeypatch, [acknowledged])
+    subscription = giso.subscribe(tools=True)
+
+    subscription.close()
+
+    assert subscription.closed
+    assert stream.closed
+
+
+def test_mcp_subscription_is_modern_only(monkeypatch):
+    def handler(payload, headers, allow_empty):
+        method = payload["method"]
+        if method == "server/discover":
+            return response({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "error": {"code": -32601, "message": "Method not found"},
+            })
+        if method == "initialize":
+            return response(
+                rpc_result(2, {
+                    "protocolVersion": "2025-11-25",
+                    "serverInfo": {"name": "legacy"},
+                    "capabilities": {"tools": {"listChanged": True}},
+                })
+            )
+        if method == "notifications/initialized":
+            return response("", status=202)
+        if method == "tools/list":
+            return response(rpc_result(payload["id"], {"tools": [tool()]}))
+        raise AssertionError(payload)
+
+    McpHttpHarness(monkeypatch, handler)
+    giso = Giso().mcp(ENDPOINT)
+
+    with pytest.raises(McpInspectionError, match="2026-07-28"):
+        giso.subscribe(tools=True)
