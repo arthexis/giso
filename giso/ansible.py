@@ -113,15 +113,31 @@ class Giso(DistributionGiso):
 
 
     def execute(self, request: AnsibleModuleRequest) -> Mapping[str, Any]:
-        """Execute one prepared Ansible module request in its bound context."""
+        """Execute one prepared request against one host or an Ansible host pattern."""
         if not isinstance(request, AnsibleModuleRequest):
             raise TypeError("Ansible execution requires an AnsibleModuleRequest from prepare()")
-        result = self._run_ansible(request)
-        operation_name = f"ansible.{request.context.host}.{request.fqcn}"
-        return self.results.add(operation_name, result)
+        host_results = self._run_ansible(request)
+
+        for host, result in host_results.items():
+            self.results.add(f"ansible.{host}.{request.fqcn}", result)
+
+        if len(host_results) == 1:
+            result = next(iter(host_results.values()))
+            if self._ansible_result_failed(result):
+                self._raise_ansible_failure(request, host_results)
+            return result
+
+        aggregate_name = f"ansible.{request.context.host}.{request.fqcn}"
+        self.results.add(aggregate_name, host_results)
+        if any(self._ansible_result_failed(result) for result in host_results.values()):
+            self._raise_ansible_failure(request, host_results)
+        return host_results
 
     @classmethod
-    def _run_ansible(cls, request: AnsibleModuleRequest) -> Mapping[str, Any]:
+    def _run_ansible(
+        cls,
+        request: AnsibleModuleRequest,
+    ) -> dict[str, Mapping[str, Any]]:
         executable = shutil.which("ansible")
         if executable is None:
             raise AnsibleExecutionError(
@@ -171,32 +187,53 @@ class Giso(DistributionGiso):
                 if detail:
                     message += f": {detail}"
                 raise AnsibleExecutionError(message)
-            if len(result_files) > 1:
-                raise AnsibleExecutionError(
-                    f"Ansible target {request.context.host!r} produced "
-                    f"{len(result_files)} host results; exactly one is required"
-                )
-            try:
-                with open(result_files[0], encoding="utf-8") as handle:
-                    result = json.load(handle)
-            except (OSError, json.JSONDecodeError) as exc:
+            results: dict[str, Mapping[str, Any]] = {}
+            for result_path in result_files:
+                host = os.path.basename(result_path)
+                try:
+                    with open(result_path, encoding="utf-8") as handle:
+                        result = json.load(handle)
+                except (OSError, json.JSONDecodeError) as exc:
+                    detail = completed.stderr.strip() or completed.stdout.strip()
+                    message = f"Ansible returned no valid result for {request.fqcn}"
+                    if detail:
+                        message += f": {detail}"
+                    raise AnsibleExecutionError(message) from exc
+                if not isinstance(result, dict):
+                    raise AnsibleExecutionError(
+                        f"Ansible returned an invalid result for {request.fqcn} on {host}"
+                    )
+                results[host] = result
+
+            if completed.returncode != 0 and not any(
+                cls._ansible_result_failed(result) for result in results.values()
+            ):
                 detail = completed.stderr.strip() or completed.stdout.strip()
-                message = f"Ansible returned no valid result for {request.fqcn}"
+                message = f"Ansible execution failed for {request.fqcn}"
                 if detail:
                     message += f": {detail}"
-                raise AnsibleExecutionError(message) from exc
+                raise AnsibleExecutionError(message, result=results)
+            return results
 
-            if not isinstance(result, dict):
-                raise AnsibleExecutionError(
-                    f"Ansible returned an invalid result for {request.fqcn}"
-                )
-            if completed.returncode != 0 or result.get("failed") is True:
-                detail = result.get("msg")
-                message = f"Ansible module {request.fqcn} failed"
-                if isinstance(detail, str) and detail:
-                    message += f": {detail}"
-                raise AnsibleExecutionError(message, result=result)
-            return result
+    @staticmethod
+    def _ansible_result_failed(result: Mapping[str, Any]) -> bool:
+        return result.get("failed") is True or result.get("unreachable") is True
+
+    @classmethod
+    def _raise_ansible_failure(
+        cls,
+        request: AnsibleModuleRequest,
+        results: Mapping[str, Mapping[str, Any]],
+    ) -> None:
+        failed_hosts = [
+            host for host, result in results.items()
+            if cls._ansible_result_failed(result)
+        ]
+        detail = ", ".join(failed_hosts)
+        message = f"Ansible module {request.fqcn} failed"
+        if detail:
+            message += f" on: {detail}"
+        raise AnsibleExecutionError(message, result=results)
 
     @classmethod
     def _execution_context(
