@@ -30,6 +30,43 @@ class McpExecutionError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class McpPromptArgument:
+    """One advertised MCP prompt argument."""
+
+    name: str
+    description: str
+    required: bool
+
+
+@dataclass(frozen=True)
+class McpPromptSpec:
+    """Read-only metadata for one MCP prompt."""
+
+    name: str
+    path: str
+    title: str
+    description: str
+    arguments: tuple[McpPromptArgument, ...]
+    icons: tuple[Mapping[str, Any], ...]
+
+
+@dataclass(frozen=True)
+class McpPromptMessage:
+    """One structured message returned by prompts/get."""
+
+    role: str
+    content: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class McpPromptResult:
+    """Resolved prompt content returned by prompts/get."""
+
+    description: str
+    messages: tuple[McpPromptMessage, ...]
+
+
+@dataclass(frozen=True)
 class McpResourceSpec:
     """Read-only metadata for one MCP resource."""
 
@@ -183,9 +220,10 @@ class Giso(AnsibleGiso):
         session = self._open_mcp_session(endpoint, private_headers)
         tools = self._list_mcp_tools(endpoint, private_headers, session)
         resources = self._list_mcp_resources(endpoint, private_headers, session)
-        if not tools and not resources:
+        prompts = self._list_mcp_prompts(endpoint, private_headers, session)
+        if not tools and not resources and not prompts:
             raise McpInspectionError(
-                f"MCP server {endpoint!r} exposes no tools or resources"
+                f"MCP server {endpoint!r} exposes no tools, resources, or prompts"
             )
 
         child = type(self)(name=self.__name__)
@@ -229,6 +267,27 @@ class Giso(AnsibleGiso):
                 ),
             )
 
+
+        seen_prompt_paths: dict[str, str] = {}
+        for payload in prompts:
+            spec = self._mcp_prompt_spec(payload)
+            previous = seen_prompt_paths.get(spec.path)
+            if previous is not None && previous != spec.name:
+                raise McpInspectionError(
+                    f"MCP prompts {previous!r} and {spec.name!r} map to the same "
+                    f"Giso path {spec.path!r}"
+                )
+            seen_prompt_paths[spec.path] = spec.name
+            child._attach_operation(
+                f"prompts.{spec.path}",
+                self._mcp_prompt_callable(
+                    spec,
+                    endpoint=endpoint,
+                    headers=private_headers,
+                    session=session,
+                ),
+            )
+
         server_spec = McpServerSpec(
             endpoint=endpoint,
             protocol_version=session.protocol_version,
@@ -248,6 +307,10 @@ class Giso(AnsibleGiso):
         if seen_resource_paths:
             provenance["resources"] = ",".join(
                 resource_uri for resource_uri in sorted(seen_resource_paths.values())
+            )
+        if seen_prompt_paths:
+            provenance["prompts"] = ",".join(
+                prompt_name for prompt_name in sorted(seen_prompt_paths.values())
             )
         if provenance not in child.provenance:
             child.provenance.append(provenance)
@@ -676,6 +739,215 @@ class Giso(AnsibleGiso):
             request_id += 1
 
         return tuple(tools)
+
+    @classmethod
+    def _list_mcp_prompts(
+        cls,
+        endpoint: str,
+        headers: Mapping[str, str],
+        session: _McpSession,
+    ) -> tuple[Mapping[str, Any], ...]:
+        if "prompts" not in session.capabilities:
+            return ()
+
+        prompts: list[Mapping[str, Any]] = []
+        cursor: str | None = None
+        request_id = 60
+        while True:
+            params: dict[str, Any] = {}
+            if cursor is not None:
+                params["cursor"] = cursor
+            payload, request_headers = cls._mcp_request(
+                session,
+                headers,
+                "prompts/list",
+                request_id=request_id,
+                params=params,
+            )
+            response = cls._post_mcp(endpoint, payload, headers=request_headers)
+            message = cls._decode_mcp_response(response)
+            cls._raise_rpc_error("prompts/list", message)
+            result = message.get("result")
+            if not isinstance(result, dict):
+                raise McpInspectionError("MCP prompts/list returned no result")
+            page = result.get("prompts")
+            if not isinstance(page, list):
+                raise McpInspectionError("MCP prompts/list returned invalid prompts")
+            for prompt in page:
+                if not isinstance(prompt, dict):
+                    raise McpInspectionError("MCP prompts/list returned an invalid prompt")
+                prompts.append(prompt)
+            next_cursor = result.get("nextCursor")
+            if next_cursor is None:
+                break
+            if not isinstance(next_cursor, str) or not next_cursor:
+                raise McpInspectionError("MCP prompts/list returned an invalid nextCursor")
+            cursor = next_cursor
+            request_id += 1
+        return tuple(prompts)
+
+    @classmethod
+    def _mcp_prompt_spec(cls, payload: Mapping[str, Any]) -> McpPromptSpec:
+        name = payload.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise McpInspectionError("MCP prompt has no valid name")
+        name = name.strip()
+        title = payload.get("title")
+        description = payload.get("description")
+        raw_arguments = payload.get("arguments")
+        arguments: list[McpPromptArgument] = []
+        if raw_arguments is not None:
+            if not isinstance(raw_arguments, list):
+                raise McpInspectionError(f"MCP prompt {name!r} has invalid arguments")
+            seen = set()
+            for argument in raw_arguments:
+                if not isinstance(argument, dict):
+                    raise McpInspectionError(f"MCP prompt {name!r} has invalid argument")
+                arg_name = argument.get("name")
+                if not isinstance(arg_name, str) or not cls._valid_public_identifier(arg_name):
+                    raise McpInspectionError(
+                        f"MCP prompt {name!r} argument has invalid name"
+                    )
+                if arg_name in seen:
+                    raise McpInspectionError(
+                        f"MCP prompt {name!r} repeats argument {arg_name!r}"
+                    )
+                seen.add(arg_name)
+                arg_description = argument.get("description")
+                arguments.append(
+                    McpPromptArgument(
+                        name=arg_name,
+                        description=arg_description if isinstance(arg_description, str) else "",
+                        required=argument.get("required") is True,
+                    )
+                )
+        icons = payload.get("icons")
+        if not isinstance(icons, list):
+            icons = []
+        return McpPromptSpec(
+            name=name,
+            path=cls._mcp_tool_path(name),
+            title=title if isinstance(title, str) else "",
+            description=description if isinstance(description, str) else "",
+            arguments=tuple(arguments),
+            icons=tuple(dict(icon) for icon in icons if isinstance(icon, dict)),
+        )
+
+    @classmethod
+    def _mcp_prompt_callable(
+        cls,
+        spec: McpPromptSpec,
+        *,
+        endpoint: str,
+        headers: Mapping[str, str],
+        session: _McpSession,
+    ):
+        def prompt(**kwargs: str) -> McpPromptResult:
+            expected = {argument.name: argument for argument in spec.arguments}
+            unknown = sorted(set(kwargs) - set(expected))
+            if unknown:
+                raise McpInspectionError(
+                    f"MCP prompt {spec.name!r} has no argument(s): {', '.join(unknown)}"
+                )
+            missing = sorted(
+                argument.name
+                for argument in spec.arguments
+                if argument.required and argument.name not in kwargs
+            )
+            if missing:
+                raise McpInspectionError(
+                    f"MCP prompt {spec.name!r} is missing required argument(s): "
+                    f"{', '.join(missing)}"
+                )
+            for name, value in kwargs.items():
+                if not isinstance(value, str):
+                    raise McpInspectionError(
+                        f"MCP prompt {spec.name!r} argument {name!r} expects str"
+                    )
+            return cls._get_mcp_prompt(
+                spec,
+                kwargs,
+                endpoint=endpoint,
+                headers=headers,
+                session=session,
+            )
+
+        parameters = []
+        for argument in spec.arguments:
+            parameters.append(
+                inspect.Parameter(
+                    argument.name,
+                    kind=inspect.Parameter.KEYWORD_ONLY,
+                    default=(
+                        inspect.Parameter.empty if argument.required else None
+                    ),
+                    annotation=str,
+                )
+            )
+        prompt.__name__ = spec.path.rsplit(".", 1)[-1]
+        prompt.__doc__ = spec.description or spec.title
+        prompt.__signature__ = inspect.Signature(parameters)  # type: ignore[attr-defined]
+        prompt.mcp_prompt = spec  # type: ignore[attr-defined]
+        return prompt
+
+    @classmethod
+    def _get_mcp_prompt(
+        cls,
+        spec: McpPromptSpec,
+        arguments: Mapping[str, str],
+        *,
+        endpoint: str,
+        headers: Mapping[str, str],
+        session: _McpSession,
+    ) -> McpPromptResult:
+        params: dict[str, Any] = {"name": spec.name}
+        if arguments:
+            params["arguments"] = dict(arguments)
+        payload, request_headers = cls._mcp_request(
+            session,
+            headers,
+            "prompts/get",
+            request_id=70,
+            params=params,
+            name=spec.name,
+        )
+        response = cls._post_mcp(endpoint, payload, headers=request_headers)
+        message = cls._decode_mcp_response(response)
+        error = message.get("error")
+        if isinstance(error, dict):
+            raise McpExecutionError(
+                cls._rpc_error_message("prompts/get", error),
+                result=error,
+            )
+        result = message.get("result")
+        if not isinstance(result, dict):
+            raise McpExecutionError("MCP prompts/get returned no result")
+        if result.get("resultType") == "input_required":
+            raise McpExecutionError(
+                "MCP prompts/get input_required continuation is not implemented",
+                result=result,
+            )
+        messages = result.get("messages")
+        if not isinstance(messages, list):
+            raise McpExecutionError("MCP prompts/get returned invalid messages", result=result)
+        decoded: list[McpPromptMessage] = []
+        for item in messages:
+            if not isinstance(item, dict):
+                raise McpExecutionError("MCP prompt message must be an object", result=result)
+            role = item.get("role")
+            content = item.get("content")
+            if role not in {"user", "assistant"}:
+                raise McpExecutionError("MCP prompt message has invalid role", result=result)
+            if not isinstance(content, dict):
+                raise McpExecutionError("MCP prompt message has invalid content", result=result)
+            decoded.append(
+                McpPromptMessage(role=role, content=dict(content))
+            )
+        description = result.get("description")
+        return McpPromptResult(
+            description=description if isinstance(description, str) else "",
+            messages=tuple(decoded),
+        )
 
     @classmethod
     def _list_mcp_resources(
