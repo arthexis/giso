@@ -26,6 +26,14 @@ class AnsibleModuleSpec:
     options: Mapping[str, Mapping[str, Any]]
 
 
+@dataclass(frozen=True)
+class AnsibleModuleRequest:
+    """A validated, non-executing Ansible module invocation."""
+
+    fqcn: str
+    args: Mapping[str, Any]
+
+
 class Giso(DistributionGiso):
     """A Giso that can inspect installed Ansible collection modules."""
 
@@ -171,11 +179,82 @@ class Giso(DistributionGiso):
                 f"{spec.fqcn} is inspection-only; Ansible execution is not implemented"
             )
 
+        def prepare(**kwargs: Any) -> AnsibleModuleRequest:
+            return cls._prepare_module_request(spec, kwargs)
+
         operation.__name__ = spec.name.rsplit(".", 1)[-1]
         operation.__doc__ = spec.short_description or "\n".join(spec.description)
         operation.__signature__ = cls._module_signature(spec)  # type: ignore[attr-defined]
         operation.ansible_spec = spec  # type: ignore[attr-defined]
+        operation.prepare = prepare  # type: ignore[attr-defined]
         return operation
+
+    @classmethod
+    def _prepare_module_request(
+        cls,
+        spec: AnsibleModuleSpec,
+        supplied: Mapping[str, Any],
+    ) -> AnsibleModuleRequest:
+        aliases: dict[str, str] = {}
+        for option_name, option in spec.options.items():
+            raw_aliases = option.get("aliases")
+            if isinstance(raw_aliases, str):
+                raw_aliases = [raw_aliases]
+            if isinstance(raw_aliases, list):
+                for alias in raw_aliases:
+                    if cls._valid_public_identifier(alias):
+                        aliases[alias] = option_name
+
+        normalized: dict[str, Any] = {}
+        for supplied_name, value in supplied.items():
+            canonical = supplied_name if supplied_name in spec.options else aliases.get(supplied_name)
+            if canonical is None:
+                raise AnsibleInspectionError(
+                    f"{spec.fqcn} has no documented option {supplied_name!r}"
+                )
+            if canonical in normalized:
+                raise AnsibleInspectionError(
+                    f"{spec.fqcn} option {canonical!r} was supplied more than once"
+                )
+            cls._validate_option_value(spec, canonical, value)
+            normalized[canonical] = value
+
+        missing = [
+            name
+            for name, option in spec.options.items()
+            if option.get("required") is True and name not in normalized
+        ]
+        if missing:
+            joined = ", ".join(sorted(missing))
+            raise AnsibleInspectionError(
+                f"{spec.fqcn} is missing required option(s): {joined}"
+            )
+
+        return AnsibleModuleRequest(fqcn=spec.fqcn, args=normalized)
+
+    @classmethod
+    def _validate_option_value(
+        cls,
+        spec: AnsibleModuleSpec,
+        name: str,
+        value: Any,
+    ) -> None:
+        option = spec.options[name]
+        expected = cls._option_annotation(option.get("type"))
+        if expected is not Any:
+            valid = isinstance(value, expected)
+            if expected is int and isinstance(value, bool):
+                valid = False
+            if not valid:
+                raise AnsibleInspectionError(
+                    f"{spec.fqcn} option {name!r} expects {expected.__name__}"
+                )
+
+        choices = option.get("choices")
+        if isinstance(choices, list) and value not in choices:
+            raise AnsibleInspectionError(
+                f"{spec.fqcn} option {name!r} must be one of {choices!r}"
+            )
 
     @classmethod
     def _module_signature(cls, spec: AnsibleModuleSpec) -> inspect.Signature:
