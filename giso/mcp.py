@@ -272,7 +272,7 @@ class Giso(AnsibleGiso):
         for payload in prompts:
             spec = self._mcp_prompt_spec(payload)
             previous = seen_prompt_paths.get(spec.path)
-            if previous is not None && previous != spec.name:
+            if previous is not None and previous != spec.name:
                 raise McpInspectionError(
                     f"MCP prompts {previous!r} and {spec.name!r} map to the same "
                     f"Giso path {spec.path!r}"
