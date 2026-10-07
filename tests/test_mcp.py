@@ -627,3 +627,107 @@ def test_mcp_execute_prefers_structured_content(monkeypatch):
     result = giso.execute(giso.charger.status.prepare(charger_id="cp-1"))
 
     assert result == {"status": "ready"}
+
+
+def test_mcp_execute_preserves_multiple_and_non_text_content(monkeypatch):
+    def handler(payload, headers, allow_empty):
+        if payload["method"] == "server/discover":
+            return response(modern_discover())
+        if payload["method"] == "tools/list":
+            return response(rpc_result(payload["id"], {"tools": [tool()]}))
+        if payload["method"] == "tools/call":
+            return response(rpc_result(payload["id"], {
+                "content": [
+                    {"type": "text", "text": "ready"},
+                    {"type": "image", "data": "abc", "mimeType": "image/png"},
+                ]
+            }))
+        raise AssertionError(payload)
+
+    McpHttpHarness(monkeypatch, handler)
+    giso = Giso().mcp(ENDPOINT)
+
+    result = giso.execute(giso.charger.status.prepare(charger_id="cp-1"))
+
+    assert result == [
+        "ready",
+        {"type": "image", "data": "abc", "mimeType": "image/png"},
+    ]
+
+
+def test_mcp_execute_surfaces_rpc_error(monkeypatch):
+    def handler(payload, headers, allow_empty):
+        if payload["method"] == "server/discover":
+            return response(modern_discover())
+        if payload["method"] == "tools/list":
+            return response(rpc_result(payload["id"], {"tools": [tool()]}))
+        if payload["method"] == "tools/call":
+            return response({
+                "jsonrpc": "2.0",
+                "id": payload["id"],
+                "error": {"code": -32000, "message": "tool rejected"},
+            })
+        raise AssertionError(payload)
+
+    McpHttpHarness(monkeypatch, handler)
+    giso = Giso().mcp(ENDPOINT)
+
+    with pytest.raises(mcp_module.McpExecutionError, match="tool rejected") as captured:
+        giso.execute(giso.charger.status.prepare(charger_id="cp-1"))
+
+    assert captured.value.result == {"code": -32000, "message": "tool rejected"}
+    assert not giso.results.history
+
+
+def test_mcp_execute_surfaces_tool_error(monkeypatch):
+    def handler(payload, headers, allow_empty):
+        if payload["method"] == "server/discover":
+            return response(modern_discover())
+        if payload["method"] == "tools/list":
+            return response(rpc_result(payload["id"], {"tools": [tool()]}))
+        if payload["method"] == "tools/call":
+            return response(rpc_result(payload["id"], {
+                "isError": True,
+                "content": [{"type": "text", "text": "charger unavailable"}],
+            }))
+        raise AssertionError(payload)
+
+    McpHttpHarness(monkeypatch, handler)
+    giso = Giso().mcp(ENDPOINT)
+
+    with pytest.raises(mcp_module.McpExecutionError, match="charger unavailable") as captured:
+        giso.execute(giso.charger.status.prepare(charger_id="cp-1"))
+
+    assert captured.value.result["isError"] is True
+    assert not giso.results.history
+
+
+@pytest.mark.parametrize("result_type", ["task", "input_required"])
+def test_mcp_execute_rejects_unimplemented_continuations(monkeypatch, result_type):
+    def handler(payload, headers, allow_empty):
+        if payload["method"] == "server/discover":
+            return response(modern_discover())
+        if payload["method"] == "tools/list":
+            return response(rpc_result(payload["id"], {"tools": [tool()]}))
+        if payload["method"] == "tools/call":
+            return response(rpc_result(payload["id"], {
+                "resultType": result_type,
+                "content": [],
+            }))
+        raise AssertionError(payload)
+
+    McpHttpHarness(monkeypatch, handler)
+    giso = Giso().mcp(ENDPOINT)
+
+    with pytest.raises(mcp_module.McpExecutionError, match="unsupported resultType") as captured:
+        giso.execute(giso.charger.status.prepare(charger_id="cp-1"))
+
+    assert captured.value.result["resultType"] == result_type
+
+
+def test_mcp_direct_call_remains_blocked(monkeypatch):
+    modern_harness(monkeypatch)
+    giso = Giso().mcp(ENDPOINT)
+
+    with pytest.raises(McpInspectionError, match="inspection-only"):
+        giso.charger.status(charger_id="cp-1")
