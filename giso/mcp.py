@@ -67,6 +67,21 @@ class McpPromptResult:
 
 
 @dataclass(frozen=True)
+class McpResourceTemplateSpec:
+    """Read-only metadata for one MCP resource template."""
+
+    uri_template: str
+    name: str
+    path: str
+    variables: tuple[str, ...]
+    title: str
+    description: str
+    mime_type: str | None
+    icons: tuple[Mapping[str, Any], ...]
+    annotations: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
 class McpResourceSpec:
     """Read-only metadata for one MCP resource."""
 
@@ -220,10 +235,16 @@ class Giso(AnsibleGiso):
         session = self._open_mcp_session(endpoint, private_headers)
         tools = self._list_mcp_tools(endpoint, private_headers, session)
         resources = self._list_mcp_resources(endpoint, private_headers, session)
+        resource_templates = self._list_mcp_resource_templates(
+            endpoint,
+            private_headers,
+            session,
+        )
         prompts = self._list_mcp_prompts(endpoint, private_headers, session)
-        if not tools and not resources and not prompts:
+        if not tools and not resources and not resource_templates and not prompts:
             raise McpInspectionError(
-                f"MCP server {endpoint!r} exposes no tools, resources, or prompts"
+                f"MCP server {endpoint!r} exposes no tools, resources, "
+                "resource templates, or prompts"
             )
 
         child = type(self)(name=self.__name__)
@@ -268,6 +289,26 @@ class Giso(AnsibleGiso):
             )
 
 
+        seen_template_paths: dict[str, str] = {}
+        for payload in resource_templates:
+            spec = self._mcp_resource_template_spec(payload)
+            previous = seen_template_paths.get(spec.path)
+            if previous is not None and previous != spec.uri_template:
+                raise McpInspectionError(
+                    f"MCP resource templates {previous!r} and {spec.uri_template!r} "
+                    f"map to the same Giso path {spec.path!r}"
+                )
+            seen_template_paths[spec.path] = spec.uri_template
+            child._attach_operation(
+                f"resource_templates.{spec.path}",
+                self._mcp_resource_template_callable(
+                    spec,
+                    endpoint=endpoint,
+                    headers=private_headers,
+                    session=session,
+                ),
+            )
+
         seen_prompt_paths: dict[str, str] = {}
         for payload in prompts:
             spec = self._mcp_prompt_spec(payload)
@@ -307,6 +348,11 @@ class Giso(AnsibleGiso):
         if seen_resource_paths:
             provenance["resources"] = ",".join(
                 resource_uri for resource_uri in sorted(seen_resource_paths.values())
+            )
+        if seen_template_paths:
+            provenance["resource_templates"] = ",".join(
+                template_uri
+                for template_uri in sorted(seen_template_paths.values())
             )
         if seen_prompt_paths:
             provenance["prompts"] = ",".join(
@@ -948,6 +994,295 @@ class Giso(AnsibleGiso):
             description=description if isinstance(description, str) else "",
             messages=tuple(decoded),
         )
+
+    @classmethod
+    def _list_mcp_resource_templates(
+        cls,
+        endpoint: str,
+        headers: Mapping[str, str],
+        session: _McpSession,
+    ) -> tuple[Mapping[str, Any], ...]:
+        if "resources" not in session.capabilities:
+            return ()
+
+        templates: list[Mapping[str, Any]] = []
+        cursor: str | None = None
+        request_id = 30
+        while True:
+            params: dict[str, Any] = {}
+            if cursor is not None:
+                params["cursor"] = cursor
+            payload, request_headers = cls._mcp_request(
+                session,
+                headers,
+                "resources/templates/list",
+                request_id=request_id,
+                params=params,
+            )
+            response = cls._post_mcp(endpoint, payload, headers=request_headers)
+            message = cls._decode_mcp_response(response)
+            cls._raise_rpc_error("resources/templates/list", message)
+            result = message.get("result")
+            if not isinstance(result, dict):
+                raise McpInspectionError(
+                    "MCP resources/templates/list returned no result"
+                )
+            page = result.get("resourceTemplates")
+            if not isinstance(page, list):
+                raise McpInspectionError(
+                    "MCP resources/templates/list returned invalid resourceTemplates"
+                )
+            for template in page:
+                if not isinstance(template, dict):
+                    raise McpInspectionError(
+                        "MCP resources/templates/list returned an invalid template"
+                    )
+                templates.append(template)
+            next_cursor = result.get("nextCursor")
+            if next_cursor is None:
+                break
+            if not isinstance(next_cursor, str) or not next_cursor:
+                raise McpInspectionError(
+                    "MCP resources/templates/list returned an invalid nextCursor"
+                )
+            cursor = next_cursor
+            request_id += 1
+        return tuple(templates)
+
+    @classmethod
+    def _mcp_resource_template_spec(
+        cls,
+        payload: Mapping[str, Any],
+    ) -> McpResourceTemplateSpec:
+        uri_template = payload.get("uriTemplate")
+        name = payload.get("name")
+        if not isinstance(uri_template, str) or not uri_template:
+            raise McpInspectionError("MCP resource template has no valid uriTemplate")
+        if not isinstance(name, str) or not name.strip():
+            raise McpInspectionError(
+                f"MCP resource template {uri_template!r} has no valid name"
+            )
+        variables = cls._uri_template_variables(uri_template)
+        title = payload.get("title")
+        description = payload.get("description")
+        mime_type = payload.get("mimeType")
+        icons = payload.get("icons")
+        annotations = payload.get("annotations")
+        return McpResourceTemplateSpec(
+            uri_template=uri_template,
+            name=name.strip(),
+            path=cls._mcp_tool_path(name.strip()),
+            variables=variables,
+            title=title if isinstance(title, str) else "",
+            description=description if isinstance(description, str) else "",
+            mime_type=mime_type if isinstance(mime_type, str) else None,
+            icons=tuple(
+                dict(icon) for icon in icons
+                if isinstance(icons, list) and isinstance(icon, dict)
+            ) if isinstance(icons, list) else (),
+            annotations=dict(annotations) if isinstance(annotations, dict) else {},
+        )
+
+    @classmethod
+    def _mcp_resource_template_callable(
+        cls,
+        spec: McpResourceTemplateSpec,
+        *,
+        endpoint: str,
+        headers: Mapping[str, str],
+        session: _McpSession,
+    ):
+        def read(**kwargs: Any) -> Any:
+            unknown = sorted(set(kwargs) - set(spec.variables))
+            if unknown:
+                raise McpInspectionError(
+                    f"MCP resource template {spec.name!r} has no variable(s): "
+                    f"{', '.join(unknown)}"
+                )
+            uri = cls._expand_uri_template(spec.uri_template, kwargs)
+            resource = McpResourceSpec(
+                uri=uri,
+                name=spec.name,
+                path=spec.path,
+                title=spec.title,
+                description=spec.description,
+                mime_type=spec.mime_type,
+                annotations=dict(spec.annotations),
+            )
+            return cls._read_mcp_resource(
+                resource,
+                endpoint=endpoint,
+                headers=headers,
+                session=session,
+            )
+
+        read.__name__ = spec.path.rsplit(".", 1)[-1]
+        read.__doc__ = spec.description or spec.title or spec.name
+        read.__signature__ = inspect.Signature(
+            [
+                inspect.Parameter(
+                    variable,
+                    kind=inspect.Parameter.KEYWORD_ONLY,
+                    default=None,
+                    annotation=Any,
+                )
+                for variable in spec.variables
+                if cls._valid_public_identifier(variable)
+            ]
+        )  # type: ignore[attr-defined]
+        read.mcp_resource_template = spec  # type: ignore[attr-defined]
+        return read
+
+    @classmethod
+    def _uri_template_variables(cls, template: str) -> tuple[str, ...]:
+        variables: list[str] = []
+        seen = set()
+        position = 0
+        for match in re.finditer(r"\{([^{}]+)\}", template):
+            if match.start() < position:
+                raise McpInspectionError(
+                    f"Invalid MCP URI template {template!r}"
+                )
+            position = match.end()
+            expression = match.group(1)
+            if expression and expression[0] in "+#./;?&":
+                expression = expression[1:]
+            if not expression:
+                raise McpInspectionError(
+                    f"Invalid MCP URI template {template!r}"
+                )
+            for variable_spec in expression.split(","):
+                variable = variable_spec.rstrip("*")
+                if ":" in variable:
+                    variable, prefix = variable.split(":", 1)
+                    if not prefix.isdigit() or int(prefix) <= 0:
+                        raise McpInspectionError(
+                            f"Invalid MCP URI template prefix in {template!r}"
+                        )
+                if not variable or not cls._valid_public_identifier(variable):
+                    raise McpInspectionError(
+                        f"MCP URI template variable {variable!r} "
+                        "must be a public Python identifier"
+                    )
+                if variable not in seen:
+                    variables.append(variable)
+                    seen.add(variable)
+        if "{" in re.sub(r"\{[^{}]+\}", "", template) or "}" in re.sub(
+            r"\{[^{}]+\}", "", template
+        ):
+            raise McpInspectionError(f"Invalid MCP URI template {template!r}")
+        return tuple(variables)
+
+    @classmethod
+    def _expand_uri_template(
+        cls,
+        template: str,
+        values: Mapping[str, Any],
+    ) -> str:
+        def expand(match: re.Match[str]) -> str:
+            expression = match.group(1)
+            operator = expression[0] if expression and expression[0] in "+#./;?&" else ""
+            body = expression[1:] if operator else expression
+            specs = body.split(",")
+            return cls._expand_uri_expression(operator, specs, values)
+
+        return re.sub(r"\{([^{}]+)\}", expand, template)
+
+    @classmethod
+    def _expand_uri_expression(
+        cls,
+        operator: str,
+        specs: list[str],
+        values: Mapping[str, Any],
+    ) -> str:
+        settings = {
+            "": ("", ",", False, ""),
+            "+": ("", ",", True, ""),
+            "#": ("#", ",", True, ""),
+            ".": (".", ".", False, ""),
+            "/": ("/", "/", False, ""),
+            ";": (";", ";", False, ";"),
+            "?": ("?", "&", False, "="),
+            "&": ("&", "&", False, "="),
+        }
+        prefix, separator, allow_reserved, named_marker = settings[operator]
+        parts: list[str] = []
+        for variable_spec in specs:
+            explode = variable_spec.endswith("*")
+            variable_spec = variable_spec.rstrip("*")
+            prefix_length = None
+            if ":" in variable_spec:
+                variable, prefix_text = variable_spec.split(":", 1)
+                prefix_length = int(prefix_text)
+            else:
+                variable = variable_spec
+            value = values.get(variable)
+            if value is None:
+                continue
+            part_values = cls._uri_template_value_parts(
+                variable,
+                value,
+                operator=operator,
+                explode=explode,
+                prefix_length=prefix_length,
+                allow_reserved=allow_reserved,
+            )
+            parts.extend(part_values)
+        if not parts:
+            return ""
+        return prefix + separator.join(parts)
+
+    @classmethod
+    def _uri_template_value_parts(
+        cls,
+        variable: str,
+        value: Any,
+        *,
+        operator: str,
+        explode: bool,
+        prefix_length: int | None,
+        allow_reserved: bool,
+    ) -> list[str]:
+        safe = ":/?#[]@!    @classmethod
+    def _list_mcp_resources(
+'()*+,;=" if allow_reserved else ""
+        quote = lambda item: urllib.parse.quote(str(item), safe=safe)
+        named = operator in {";", "?", "&"}
+
+        if isinstance(value, dict):
+            items = [(quote(key), quote(item)) for key, item in value.items()]
+            if explode:
+                if named and operator in {"?", "&"}:
+                    return [f"{key}={item}" for key, item in items]
+                return [f"{key}={item}" for key, item in items]
+            joined = ",".join(
+                component
+                for pair in items
+                for component in pair
+            )
+            return [f"{quote(variable)}={joined}" if named else joined]
+
+        if isinstance(value, (list, tuple)):
+            encoded = [quote(item) for item in value]
+            if explode:
+                if named and operator in {"?", "&"}:
+                    return [f"{quote(variable)}={item}" for item in encoded]
+                if named and operator == ";":
+                    return [f"{quote(variable)}={item}" for item in encoded]
+                return encoded
+            joined = ",".join(encoded)
+            return [f"{quote(variable)}={joined}" if named else joined]
+
+        text = str(value)
+        if prefix_length is not None:
+            text = text[:prefix_length]
+        encoded = quote(text)
+        if not named:
+            return [encoded]
+        name = quote(variable)
+        if operator == ";" and encoded == "":
+            return [name]
+        return [f"{name}={encoded}"]
 
     @classmethod
     def _list_mcp_resources(
