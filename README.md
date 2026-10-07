@@ -231,9 +231,24 @@ result = g.execute(request)
 
 The bound host, inventory source, and optional connection are carried by the `AnsibleModuleRequest`. If no explicit connection is supplied, Ansible resolves connection settings from inventory/configuration. Giso invokes the installed `ansible` command and reads structured host results from Ansible's `--tree` output.
 
-Each binding is deliberately single-target. If the host expression produces more than one host result, execution fails instead of silently returning an aggregate. Successful results are recorded under `ansible.<host>.<fqcn>` in `g.results`. Module failures raise `AnsibleExecutionError` and preserve the returned Ansible result on the exception.
+The bound host may also be an Ansible group or host pattern:
 
-Directly calling the module operation still raises `AnsibleInspectionError`; execution remains explicit through `prepare()` followed by `execute()`. Plays, roles, playbooks, and multi-host fan-out are not part of this slice.
+```python
+g = Giso().ansible(
+    "community.general",
+    inventory="./inventory.yml",
+    host="chargers",
+)
+
+request = g.community.general.modules.nmcli.prepare(conn_name="wired")
+results = g.execute(request)
+```
+
+When exactly one concrete host responds, `execute()` preserves the single-host API and returns that host's result mapping directly. When multiple hosts respond, it returns `{hostname: result}` in deterministic host-name order.
+
+Every concrete host result is recorded under `ansible.<host>.<fqcn>`. Multi-host runs are also recorded as an aggregate under `ansible.<pattern>.<fqcn>`. If any host reports `failed` or `unreachable`, Giso records all host results and then raises `AnsibleExecutionError`; for multi-host failures, `exc.result` contains the complete host-to-result mapping, including successful hosts.
+
+Directly calling the module operation still raises `AnsibleInspectionError`; execution remains explicit through `prepare()` followed by `execute()`. Plays, roles, and playbooks are not part of this slice.
 
 ## OpenAPI
 
