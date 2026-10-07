@@ -244,10 +244,11 @@ class Giso(AnsibleGiso):
             "protocol_version": session.protocol_version,
             "era": session.era,
             "tools": ",".join(spec_name for spec_name in sorted(seen_paths.values())),
-            "resources": ",".join(
-                resource_uri for resource_uri in sorted(seen_resource_paths.values())
-            ),
         }
+        if seen_resource_paths:
+            provenance["resources"] = ",".join(
+                resource_uri for resource_uri in sorted(seen_resource_paths.values())
+            )
         if provenance not in child.provenance:
             child.provenance.append(provenance)
         self.fold(child)
