@@ -1243,8 +1243,9 @@ class Giso(AnsibleGiso):
         prefix_length: int | None,
         allow_reserved: bool,
     ) -> list[str]:
-        safe = ":/?#[]@!    @classmethod
+        safe = ":/?#[]@!        safe = ":/?#[]@!    @classmethod
     def _list_mcp_resources(
+'()*+,;=" if allow_reserved else ""
 '()*+,;=" if allow_reserved else ""
         quote = lambda item: urllib.parse.quote(str(item), safe=safe)
         named = operator in {";", "?", "&"}
