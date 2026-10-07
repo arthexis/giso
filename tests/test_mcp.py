@@ -532,3 +532,98 @@ def test_mcp_prepare_works_under_named_constructor_branch(monkeypatch):
     assert request.name == "charger.status"
     assert request.arguments == {"charger_id": "cp-1"}
     assert not giso.results.history
+
+
+def test_mcp_execute_calls_modern_tool(monkeypatch):
+    def handler(payload, headers, allow_empty):
+        if payload["method"] == "server/discover":
+            return response(modern_discover())
+        if payload["method"] == "tools/list":
+            return response(rpc_result(payload["id"], {"tools": [tool()]}))
+        if payload["method"] == "tools/call":
+            assert headers["Mcp-Method"] == "tools/call"
+            assert headers["Mcp-Name"] == "charger.status"
+            assert headers["MCP-Protocol-Version"] == mcp_module.MODERN_PROTOCOL_VERSION
+            assert payload["params"]["name"] == "charger.status"
+            assert payload["params"]["arguments"] == {"charger_id": "cp-1"}
+            return response(
+                rpc_result(
+                    payload["id"],
+                    {"content": [{"type": "text", "text": "{\"status\":\"ready\"}"}]},
+                )
+            )
+        raise AssertionError(payload)
+
+    McpHttpHarness(monkeypatch, handler)
+    giso = Giso().mcp(ENDPOINT)
+
+    result = giso.execute(giso.charger.status.prepare(charger_id="cp-1"))
+
+    assert result == {"status": "ready"}
+    assert giso.results.last == result
+    assert giso.results.history[-1][0] == "mcp.charger.status"
+
+
+def test_mcp_execute_calls_legacy_tool_with_session(monkeypatch):
+    def handler(payload, headers, allow_empty):
+        method = payload["method"]
+        if method == "server/discover":
+            return response({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "error": {"code": -32601, "message": "Method not found"},
+            })
+        if method == "initialize":
+            return response(
+                rpc_result(2, {
+                    "protocolVersion": "2025-11-25",
+                    "serverInfo": {"name": "legacy-mcp"},
+                    "capabilities": {"tools": {}},
+                }),
+                headers={
+                    "Content-Type": "application/json",
+                    "MCP-Session-Id": "session-123",
+                },
+            )
+        if method == "notifications/initialized":
+            return response("", status=202)
+        if method == "tools/list":
+            return response(rpc_result(payload["id"], {"tools": [tool()]}))
+        if method == "tools/call":
+            assert headers["MCP-Session-Id"] == "session-123"
+            assert headers["MCP-Protocol-Version"] == "2025-11-25"
+            assert "Mcp-Method" not in headers
+            assert "Mcp-Name" not in headers
+            return response(rpc_result(
+                payload["id"],
+                {"content": [{"type": "text", "text": "ready"}]},
+            ))
+        raise AssertionError(payload)
+
+    McpHttpHarness(monkeypatch, handler)
+    giso = Giso().mcp(ENDPOINT)
+
+    result = giso.execute(giso.charger.status.prepare(charger_id="cp-1"))
+
+    assert result == "ready"
+
+
+def test_mcp_execute_prefers_structured_content(monkeypatch):
+    def handler(payload, headers, allow_empty):
+        if payload["method"] == "server/discover":
+            return response(modern_discover())
+        if payload["method"] == "tools/list":
+            return response(rpc_result(payload["id"], {"tools": [tool()]}))
+        if payload["method"] == "tools/call":
+            return response(rpc_result(payload["id"], {
+                "structuredContent": {"status": "ready"},
+                "content": [{"type": "text", "text": "ignored"}],
+            }))
+        raise AssertionError(payload)
+
+    McpHttpHarness(monkeypatch, handler)
+    giso = Giso().mcp(ENDPOINT)
+
+    result = giso.execute(giso.charger.status.prepare(charger_id="cp-1"))
+
+    assert result == {"status": "ready"}
