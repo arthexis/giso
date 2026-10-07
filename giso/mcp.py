@@ -33,6 +33,19 @@ class McpToolSpec:
 
 
 @dataclass(frozen=True)
+class McpToolRequest:
+    """A validated, non-executing MCP tool request."""
+
+    name: str
+    arguments: Mapping[str, Any]
+    endpoint: str
+    protocol_version: str
+    era: str
+    session_id: str | None
+    headers: Mapping[str, str]
+
+
+@dataclass(frozen=True)
 class McpServerSpec:
     """Negotiated metadata for one inspected MCP server."""
 
@@ -95,7 +108,15 @@ class Giso(AnsibleGiso):
                     f"Giso path {spec.path!r}"
                 )
             seen_paths[spec.path] = spec.name
-            child._attach_operation(spec.path, self._mcp_inspection_callable(spec))
+            child._attach_operation(
+                spec.path,
+                self._mcp_inspection_callable(
+                    spec,
+                    endpoint=endpoint,
+                    headers=private_headers,
+                    session=session,
+                ),
+            )
 
         server_spec = McpServerSpec(
             endpoint=endpoint,
@@ -331,17 +352,150 @@ class Giso(AnsibleGiso):
         )
 
     @classmethod
-    def _mcp_inspection_callable(cls, spec: McpToolSpec):
+    def _mcp_inspection_callable(
+        cls,
+        spec: McpToolSpec,
+        *,
+        endpoint: str,
+        headers: Mapping[str, str],
+        session: _McpSession,
+    ):
         def operation(**kwargs: Any) -> None:
             raise McpInspectionError(
                 f"MCP tool {spec.name!r} is inspection-only; execution is not implemented"
+            )
+
+        def prepare(**kwargs: Any) -> McpToolRequest:
+            cls._validate_json_schema_value(
+                kwargs,
+                spec.input_schema,
+                path=f"MCP tool {spec.name!r} arguments",
+            )
+            return McpToolRequest(
+                name=spec.name,
+                arguments=dict(kwargs),
+                endpoint=endpoint,
+                protocol_version=session.protocol_version,
+                era=session.era,
+                session_id=session.session_id,
+                headers=dict(headers),
             )
 
         operation.__name__ = spec.path.rsplit(".", 1)[-1]
         operation.__doc__ = spec.description
         operation.__signature__ = cls._mcp_tool_signature(spec)  # type: ignore[attr-defined]
         operation.mcp_tool = spec  # type: ignore[attr-defined]
+        operation.prepare = prepare  # type: ignore[attr-defined]
         return operation
+
+    @classmethod
+    def _validate_json_schema_value(
+        cls,
+        value: Any,
+        schema: Mapping[str, Any],
+        *,
+        path: str,
+    ) -> None:
+        if "const" in schema and value != schema["const"]:
+            raise McpInspectionError(f"{path} must equal {schema['const']!r}")
+
+        enum = schema.get("enum")
+        if isinstance(enum, list) and value not in enum:
+            raise McpInspectionError(f"{path} must be one of {enum!r}")
+
+        schema_type = schema.get("type")
+        allowed_types: list[str] = []
+        if isinstance(schema_type, str):
+            allowed_types = [schema_type]
+        elif isinstance(schema_type, list):
+            allowed_types = [item for item in schema_type if isinstance(item, str)]
+
+        if allowed_types:
+            if value is None and "null" in allowed_types:
+                return
+            non_null_types = [item for item in allowed_types if item != "null"]
+            if non_null_types and not any(
+                cls._json_schema_type_matches(value, item)
+                for item in non_null_types
+            ):
+                expected = " or ".join(non_null_types)
+                raise McpInspectionError(f"{path} expects {expected}")
+
+        effective_type = None
+        if isinstance(schema_type, str):
+            effective_type = schema_type
+        elif isinstance(schema_type, list):
+            non_null_types = [item for item in schema_type if item != "null"]
+            if len(non_null_types) == 1:
+                effective_type = non_null_types[0]
+
+        if effective_type == "object" or (
+            effective_type is None and isinstance(value, dict) and "properties" in schema
+        ):
+            if not isinstance(value, dict):
+                return
+            properties = schema.get("properties")
+            if not isinstance(properties, dict):
+                properties = {}
+            required = schema.get("required")
+            required_names = {
+                item for item in required
+                if isinstance(required, list) and isinstance(item, str)
+            } if isinstance(required, list) else set()
+            missing = sorted(name for name in required_names if name not in value)
+            if missing:
+                raise McpInspectionError(
+                    f"{path} is missing required field(s): {', '.join(missing)}"
+                )
+
+            additional = schema.get("additionalProperties", True)
+            for name, item in value.items():
+                property_schema = properties.get(name)
+                if isinstance(property_schema, dict):
+                    cls._validate_json_schema_value(
+                        item,
+                        property_schema,
+                        path=f"{path}.{name}",
+                    )
+                    continue
+                if additional is False:
+                    raise McpInspectionError(
+                        f"{path} has no allowed field {name!r}"
+                    )
+                if isinstance(additional, dict):
+                    cls._validate_json_schema_value(
+                        item,
+                        additional,
+                        path=f"{path}.{name}",
+                    )
+
+        if effective_type == "array" and isinstance(value, list):
+            items = schema.get("items")
+            if isinstance(items, dict):
+                for index, item in enumerate(value):
+                    cls._validate_json_schema_value(
+                        item,
+                        items,
+                        path=f"{path}[{index}]",
+                    )
+
+    @staticmethod
+    def _json_schema_type_matches(value: Any, schema_type: str) -> bool:
+        if schema_type == "string":
+            return isinstance(value, str)
+        if schema_type == "integer":
+            return isinstance(value, int) and not isinstance(value, bool)
+        if schema_type == "number":
+            return isinstance(value, (int, float)) and not isinstance(value, bool)
+        if schema_type == "boolean":
+            return isinstance(value, bool)
+        if schema_type == "array":
+            return isinstance(value, list)
+        if schema_type == "object":
+            return isinstance(value, dict)
+        if schema_type == "null":
+            return value is None
+        return True
 
     @classmethod
     def _mcp_tool_signature(cls, spec: McpToolSpec) -> inspect.Signature:
