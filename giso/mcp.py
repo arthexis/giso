@@ -30,6 +30,15 @@ class McpExecutionError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class McpCompletion:
+    """Completion suggestions returned by completion/complete."""
+
+    values: tuple[str, ...]
+    total: int | None = None
+    has_more: bool | None = None
+
+
+@dataclass(frozen=True)
 class McpPromptArgument:
     """One advertised MCP prompt argument."""
 
@@ -934,6 +943,14 @@ class Giso(AnsibleGiso):
         prompt.__doc__ = spec.description or spec.title
         prompt.__signature__ = inspect.Signature(parameters)  # type: ignore[attr-defined]
         prompt.mcp_prompt = spec  # type: ignore[attr-defined]
+        if "completions" in session.capabilities:
+            prompt.complete = cls._mcp_completion_callable(  # type: ignore[attr-defined]
+                ref={"type": "ref/prompt", "name": spec.name},
+                argument_names=tuple(argument.name for argument in spec.arguments),
+                endpoint=endpoint,
+                headers=headers,
+                session=session,
+            )
         return prompt
 
     @classmethod
@@ -1050,6 +1067,132 @@ class Giso(AnsibleGiso):
         return tuple(templates)
 
     @classmethod
+    def _mcp_completion_callable(
+        cls,
+        *,
+        ref: Mapping[str, str],
+        argument_names: tuple[str, ...],
+        endpoint: str,
+        headers: Mapping[str, str],
+        session: _McpSession,
+    ):
+        def complete(
+            argument: str,
+            value: str = "",
+            *,
+            context: Mapping[str, str] | None = None,
+        ) -> McpCompletion:
+            if argument not in argument_names:
+                raise McpInspectionError(
+                    f"MCP completion reference has no argument {argument!r}"
+                )
+            if not isinstance(value, str):
+                raise McpInspectionError("MCP completion value must be a string")
+            context_arguments: dict[str, str] | None = None
+            if context is not None:
+                if not isinstance(context, Mapping):
+                    raise McpInspectionError(
+                        "MCP completion context must be a mapping"
+                    )
+                unknown = sorted(set(context) - set(argument_names))
+                if unknown:
+                    raise McpInspectionError(
+                        "MCP completion context has unknown argument(s): "
+                        + ", ".join(unknown)
+                    )
+                context_arguments = {}
+                for name, item in context.items():
+                    if not isinstance(name, str) or not isinstance(item, str):
+                        raise McpInspectionError(
+                            "MCP completion context names and values must be strings"
+                        )
+                    context_arguments[name] = item
+            return cls._complete_mcp(
+                ref=ref,
+                argument={"name": argument, "value": value},
+                context=context_arguments,
+                endpoint=endpoint,
+                headers=headers,
+                session=session,
+            )
+
+        complete.__name__ = "complete"
+        complete.__doc__ = "Complete one MCP prompt or resource-template argument."
+        return complete
+
+    @classmethod
+    def _complete_mcp(
+        cls,
+        *,
+        ref: Mapping[str, str],
+        argument: Mapping[str, str],
+        context: Mapping[str, str] | None,
+        endpoint: str,
+        headers: Mapping[str, str],
+        session: _McpSession,
+    ) -> McpCompletion:
+        params: dict[str, Any] = {
+            "ref": dict(ref),
+            "argument": dict(argument),
+        }
+        if context:
+            params["context"] = {"arguments": dict(context)}
+
+        name = ref.get("name") or ref.get("uri")
+        payload, request_headers = cls._mcp_request(
+            session,
+            headers,
+            "completion/complete",
+            request_id=80,
+            params=params,
+            name=name,
+        )
+        response = cls._post_mcp(endpoint, payload, headers=request_headers)
+        message = cls._decode_mcp_response(response)
+        error = message.get("error")
+        if isinstance(error, dict):
+            raise McpExecutionError(
+                cls._rpc_error_message("completion/complete", error),
+                result=error,
+            )
+        result = message.get("result")
+        if not isinstance(result, dict):
+            raise McpExecutionError("MCP completion/complete returned no result")
+        completion = result.get("completion")
+        if not isinstance(completion, dict):
+            raise McpExecutionError(
+                "MCP completion/complete returned invalid completion",
+                result=result,
+            )
+        values = completion.get("values")
+        if not isinstance(values, list) or not all(
+            isinstance(value, str) for value in values
+        ):
+            raise McpExecutionError(
+                "MCP completion/complete returned invalid values",
+                result=result,
+            )
+        total = completion.get("total")
+        if total is not None and (
+            not isinstance(total, int) or isinstance(total, bool) or total < 0
+        ):
+            raise McpExecutionError(
+                "MCP completion/complete returned invalid total",
+                result=result,
+            )
+        has_more = completion.get("hasMore")
+        if has_more is not None and not isinstance(has_more, bool):
+            raise McpExecutionError(
+                "MCP completion/complete returned invalid hasMore",
+                result=result,
+            )
+        return McpCompletion(
+            values=tuple(values),
+            total=total,
+            has_more=has_more,
+        )
+
+    @classmethod
     def _mcp_resource_template_spec(
         cls,
         payload: Mapping[str, Any],
@@ -1131,6 +1274,14 @@ class Giso(AnsibleGiso):
             ]
         )  # type: ignore[attr-defined]
         read.mcp_resource_template = spec  # type: ignore[attr-defined]
+        if "completions" in session.capabilities:
+            read.complete = cls._mcp_completion_callable(  # type: ignore[attr-defined]
+                ref={"type": "ref/resource", "uri": spec.uri_template},
+                argument_names=spec.variables,
+                endpoint=endpoint,
+                headers=headers,
+                session=session,
+            )
         return read
 
     @classmethod
