@@ -166,6 +166,9 @@ def test_ansible_prepare_returns_validated_request(monkeypatch):
         "state": "present",
         "autoconnect": True,
     }
+    assert request.context.host == "localhost"
+    assert request.context.inventory == "localhost,"
+    assert request.context.connection == "local"
     assert not Giso().results.history
 
 
@@ -217,7 +220,17 @@ def test_ansible_prepare_works_under_named_branch(monkeypatch):
     assert not giso.results.history
 
 
-def patch_local_execution(monkeypatch, tmp_path, *, result, returncode=0, stdout="", stderr=""):
+def patch_local_execution(
+    monkeypatch,
+    tmp_path,
+    *,
+    result,
+    returncode=0,
+    stdout="",
+    stderr="",
+    result_host="localhost",
+    commands=None,
+):
     monkeypatch.setattr(ansible_module.shutil, "which", lambda executable: f"/usr/bin/{executable}")
 
     class Completed:
@@ -227,8 +240,10 @@ def patch_local_execution(monkeypatch, tmp_path, *, result, returncode=0, stdout
             self.stderr = stderr
 
     def run(command, **kwargs):
+        if commands is not None:
+            commands.append(command)
         tree = command[command.index("--tree") + 1]
-        result_path = ansible_module.os.path.join(tree, "localhost")
+        result_path = ansible_module.os.path.join(tree, result_host)
         with open(result_path, "w", encoding="utf-8") as handle:
             ansible_module.json.dump(result, handle)
         return Completed()
@@ -321,3 +336,118 @@ def test_ansible_module_args_are_serialized_deterministically():
         "name='wired connection' enabled=true count=2 "
         "items='[\"a\",\"b\"]' settings='{\"mode\":\"auto\"}'"
     )
+
+
+def test_ansible_prepare_carries_bound_inventory_context(monkeypatch):
+    patch_ansible_doc(monkeypatch)
+    giso = Giso().ansible(
+        "community.general",
+        inventory="./inventory.yml",
+        host="gway-004",
+    )
+
+    request = giso.community.general.modules.nmcli.prepare(name="eth0")
+
+    assert request.context.host == "gway-004"
+    assert request.context.inventory == "./inventory.yml"
+    assert request.context.connection is None
+
+
+def test_ansible_execute_uses_bound_inventory_and_host(monkeypatch, tmp_path):
+    patch_ansible_doc(monkeypatch)
+    commands = []
+    patch_local_execution(
+        monkeypatch,
+        tmp_path,
+        result={"changed": True},
+        result_host="gway-004",
+        commands=commands,
+    )
+    giso = Giso().ansible(
+        "community.general",
+        inventory="./inventory.yml",
+        host="gway-004",
+        connection="ssh",
+    )
+    request = giso.community.general.modules.nmcli.prepare(name="eth0")
+
+    result = giso.execute(request)
+
+    assert result == {"changed": True}
+    command = commands[-1]
+    assert command[1] == "gway-004"
+    assert command[command.index("--inventory") + 1] == "./inventory.yml"
+    assert command[command.index("--connection") + 1] == "ssh"
+    assert giso.results.history[-1][0] == "ansible.gway-004.community.general.nmcli"
+
+
+def test_ansible_execute_uses_inventory_connection_when_unbound(monkeypatch, tmp_path):
+    patch_ansible_doc(monkeypatch)
+    commands = []
+    patch_local_execution(
+        monkeypatch,
+        tmp_path,
+        result={"changed": False},
+        result_host="gway-004",
+        commands=commands,
+    )
+    giso = Giso().ansible(
+        "community.general",
+        inventory="./inventory.yml",
+        host="gway-004",
+    )
+    request = giso.community.general.modules.nmcli.prepare(name="eth0")
+
+    giso.execute(request)
+
+    command = commands[-1]
+    assert "--connection" not in command
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"host": "gway-004"}, "inventory is required"),
+        ({"inventory": "./inventory.yml"}, "host is required"),
+        ({"inventory": "" , "host": "gway-004"}, "inventory must be"),
+        ({"inventory": "./inventory.yml", "host": "bad host"}, "must not contain whitespace"),
+        ({"inventory": "./inventory.yml", "host": "gway-004", "connection": ""}, "connection must be"),
+        ({"connection": "ssh"}, "implicit localhost inventory only supports local"),
+    ],
+)
+def test_ansible_execution_context_is_validated(kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        Giso._execution_context(**{
+            "inventory": kwargs.get("inventory"),
+            "host": kwargs.get("host"),
+            "connection": kwargs.get("connection"),
+        })
+
+
+def test_ansible_execute_rejects_multiple_host_results(monkeypatch):
+    monkeypatch.setattr(ansible_module.shutil, "which", lambda executable: "/usr/bin/ansible")
+
+    class Completed:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def run(command, **kwargs):
+        tree = command[command.index("--tree") + 1]
+        for host in ("gway-004", "gway-005"):
+            with open(ansible_module.os.path.join(tree, host), "w", encoding="utf-8") as handle:
+                ansible_module.json.dump({"changed": False}, handle)
+        return Completed()
+
+    monkeypatch.setattr(ansible_module.subprocess, "run", run)
+    request = ansible_module.AnsibleModuleRequest(
+        fqcn="community.general.nmcli",
+        args={"conn_name": "eth0"},
+        context=ansible_module.AnsibleExecutionContext(
+            host="chargers",
+            inventory="./inventory.yml",
+        ),
+    )
+
+    with pytest.raises(AnsibleExecutionError, match="exactly one is required"):
+        Giso().execute(request)
