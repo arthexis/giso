@@ -1184,3 +1184,368 @@ def test_mcp_resource_path_collisions_are_rejected_atomically(monkeypatch):
 
     assert not giso.operations
     assert not giso.provenance
+
+
+def prompt(
+    name="code_review",
+    *,
+    title="Request Code Review",
+    description="Review code",
+    arguments=None,
+):
+    if arguments is None:
+        arguments = [
+            {
+                "name": "code",
+                "description": "Code to review",
+                "required": True,
+            },
+            {
+                "name": "language",
+                "description": "Programming language",
+                "required": False,
+            },
+        ]
+    return {
+        "name": name,
+        "title": title,
+        "description": description,
+        "arguments": arguments,
+        "icons": [
+            {
+                "src": "https://example.test/icon.svg",
+                "mimeType": "image/svg+xml",
+                "sizes": ["any"],
+            }
+        ],
+    }
+
+
+def prompt_harness(monkeypatch, prompts=None, *, legacy=False):
+    prompts = [prompt()] if prompts is None else prompts
+
+    def handler(payload, headers, allow_empty):
+        method = payload["method"]
+        if method == "server/discover":
+            if legacy:
+                return response({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "error": {"code": -32601, "message": "Method not found"},
+                })
+            result = modern_discover()
+            result["result"]["capabilities"]["prompts"] = {}
+            return response(result)
+        if method == "initialize":
+            return response(
+                rpc_result(2, {
+                    "protocolVersion": "2025-11-25",
+                    "serverInfo": {"name": "legacy-mcp"},
+                    "capabilities": {"tools": {}, "prompts": {}},
+                }),
+                headers={
+                    "Content-Type": "application/json",
+                    "MCP-Session-Id": "prompt-session",
+                },
+            )
+        if method == "notifications/initialized":
+            return response("", status=202)
+        if method == "tools/list":
+            return response(rpc_result(payload["id"], {"tools": [tool()]}))
+        if method == "prompts/list":
+            return response(rpc_result(payload["id"], {"prompts": prompts}))
+        if method == "prompts/get":
+            return response(rpc_result(payload["id"], {
+                "resultType": "complete",
+                "description": "Resolved prompt",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": {
+                            "type": "text",
+                            "text": f"Review: {payload['params']['arguments']['code']}",
+                        },
+                    },
+                    {
+                        "role": "assistant",
+                        "content": {
+                            "type": "resource_link",
+                            "uri": "file:///style.md",
+                            "name": "style-guide",
+                        },
+                    },
+                ],
+            }))
+        raise AssertionError(payload)
+
+    return McpHttpHarness(monkeypatch, handler)
+
+
+def test_mcp_prompts_are_discovered_and_folded(monkeypatch):
+    prompt_harness(monkeypatch)
+
+    giso = Giso().mcp(ENDPOINT)
+
+    operation = giso.prompts.code_review
+    assert operation.mcp_prompt.name == "code_review"
+    assert operation.mcp_prompt.title == "Request Code Review"
+    assert operation.mcp_prompt.description == "Review code"
+    assert tuple(argument.name for argument in operation.mcp_prompt.arguments) == (
+        "code",
+        "language",
+    )
+    assert giso.provenance[0]["prompts"] == "code_review"
+
+
+def test_mcp_prompt_signature_comes_from_arguments(monkeypatch):
+    prompt_harness(monkeypatch)
+
+    signature = inspect.signature(Giso().mcp(ENDPOINT).prompts.code_review)
+
+    assert tuple(signature.parameters) == ("code", "language")
+    assert signature.parameters["code"].default is inspect.Parameter.empty
+    assert signature.parameters["code"].annotation is str
+    assert signature.parameters["language"].default is None
+    assert signature.parameters["language"].annotation is str
+
+
+def test_mcp_prompt_get_returns_structured_messages(monkeypatch):
+    prompt_harness(monkeypatch)
+    giso = Giso().mcp(ENDPOINT)
+
+    result = giso.prompts.code_review(code="print('hi')")
+
+    assert isinstance(result, mcp_module.McpPromptResult)
+    assert result.description == "Resolved prompt"
+    assert result.messages == (
+        mcp_module.McpPromptMessage(
+            role="user",
+            content={"type": "text", "text": "Review: print('hi')"},
+        ),
+        mcp_module.McpPromptMessage(
+            role="assistant",
+            content={
+                "type": "resource_link",
+                "uri": "file:///style.md",
+                "name": "style-guide",
+            },
+        ),
+    )
+
+
+def test_mcp_prompt_get_uses_modern_routing_headers(monkeypatch):
+    prompts = [prompt()]
+
+    def handler(payload, headers, allow_empty):
+        if payload["method"] == "server/discover":
+            result = modern_discover()
+            result["result"]["capabilities"]["prompts"] = {}
+            return response(result)
+        if payload["method"] == "tools/list":
+            return response(rpc_result(payload["id"], {"tools": [tool()]}))
+        if payload["method"] == "prompts/list":
+            assert headers["Mcp-Method"] == "prompts/list"
+            return response(rpc_result(payload["id"], {"prompts": prompts}))
+        if payload["method"] == "prompts/get":
+            assert headers["Mcp-Method"] == "prompts/get"
+            assert headers["Mcp-Name"] == "code_review"
+            assert payload["params"] == {
+                "name": "code_review",
+                "arguments": {"code": "x"},
+            }
+            return response(rpc_result(payload["id"], {
+                "resultType": "complete",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": {"type": "text", "text": "x"},
+                    }
+                ],
+            }))
+        raise AssertionError(payload)
+
+    McpHttpHarness(monkeypatch, handler)
+    giso = Giso().mcp(ENDPOINT)
+
+    assert giso.prompts.code_review(code="x").messages[0].content["text"] == "x"
+
+
+def test_mcp_prompt_get_uses_legacy_session(monkeypatch):
+    calls = []
+    prompts = [prompt()]
+
+    def handler(payload, headers, allow_empty):
+        calls.append((payload, dict(headers)))
+        method = payload["method"]
+        if method == "server/discover":
+            return response({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "error": {"code": -32601, "message": "Method not found"},
+            })
+        if method == "initialize":
+            return response(
+                rpc_result(2, {
+                    "protocolVersion": "2025-11-25",
+                    "serverInfo": {"name": "legacy-mcp"},
+                    "capabilities": {"tools": {}, "prompts": {}},
+                }),
+                headers={
+                    "Content-Type": "application/json",
+                    "MCP-Session-Id": "prompt-session",
+                },
+            )
+        if method == "notifications/initialized":
+            return response("", status=202)
+        if method == "tools/list":
+            return response(rpc_result(payload["id"], {"tools": [tool()]}))
+        if method == "prompts/list":
+            assert headers["MCP-Session-Id"] == "prompt-session"
+            return response(rpc_result(payload["id"], {"prompts": prompts}))
+        if method == "prompts/get":
+            assert headers["MCP-Session-Id"] == "prompt-session"
+            assert "Mcp-Method" not in headers
+            return response(rpc_result(payload["id"], {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": {"type": "text", "text": "legacy"},
+                    }
+                ],
+            }))
+        raise AssertionError(payload)
+
+    McpHttpHarness(monkeypatch, handler)
+    giso = Giso().mcp(ENDPOINT)
+
+    assert giso.prompts.code_review(code="x").messages[0].content["text"] == "legacy"
+
+
+def test_mcp_prompts_list_is_paginated(monkeypatch):
+    def handler(payload, headers, allow_empty):
+        if payload["method"] == "server/discover":
+            result = modern_discover()
+            result["result"]["capabilities"]["prompts"] = {}
+            return response(result)
+        if payload["method"] == "tools/list":
+            return response(rpc_result(payload["id"], {"tools": [tool()]}))
+        if payload["method"] == "prompts/list":
+            cursor = payload["params"].get("cursor")
+            if cursor is None:
+                return response(rpc_result(payload["id"], {
+                    "prompts": [prompt("code_review")],
+                    "nextCursor": "page-2",
+                }))
+            assert cursor == "page-2"
+            return response(rpc_result(payload["id"], {
+                "prompts": [
+                    prompt(
+                        "summarize",
+                        arguments=[
+                            {"name": "text", "required": True},
+                        ],
+                    )
+                ]
+            }))
+        raise AssertionError(payload)
+
+    McpHttpHarness(monkeypatch, handler)
+    giso = Giso().mcp(ENDPOINT)
+
+    assert giso.prompts.code_review.mcp_prompt.name == "code_review"
+    assert giso.prompts.summarize.mcp_prompt.name == "summarize"
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({}, "missing required"),
+        ({"code": "x", "unknown": "y"}, "has no argument"),
+        ({"code": 3}, "expects str"),
+    ],
+)
+def test_mcp_prompt_arguments_are_validated(monkeypatch, kwargs, message):
+    prompt_harness(monkeypatch)
+    operation = Giso().mcp(ENDPOINT).prompts.code_review
+
+    with pytest.raises(McpInspectionError, match=message):
+        operation(**kwargs)
+
+
+def test_mcp_prompt_only_server_is_accepted(monkeypatch):
+    def handler(payload, headers, allow_empty):
+        if payload["method"] == "server/discover":
+            result = modern_discover()
+            result["result"]["capabilities"] = {"prompts": {}}
+            return response(result)
+        if payload["method"] == "tools/list":
+            return response(rpc_result(payload["id"], {"tools": []}))
+        if payload["method"] == "prompts/list":
+            return response(rpc_result(payload["id"], {"prompts": [prompt()]}))
+        raise AssertionError(payload)
+
+    McpHttpHarness(monkeypatch, handler)
+
+    giso = Giso().mcp(ENDPOINT)
+
+    assert giso.prompts.code_review.mcp_prompt.name == "code_review"
+
+
+def test_mcp_prompt_path_collisions_are_rejected_atomically(monkeypatch):
+    prompts = [
+        prompt("code-review"),
+        prompt("code_review"),
+    ]
+
+    def handler(payload, headers, allow_empty):
+        if payload["method"] == "server/discover":
+            result = modern_discover()
+            result["result"]["capabilities"]["prompts"] = {}
+            return response(result)
+        if payload["method"] == "tools/list":
+            return response(rpc_result(payload["id"], {"tools": [tool()]}))
+        if payload["method"] == "prompts/list":
+            return response(rpc_result(payload["id"], {"prompts": prompts}))
+        raise AssertionError(payload)
+
+    McpHttpHarness(monkeypatch, handler)
+    giso = Giso()
+
+    with pytest.raises(McpInspectionError, match="same Giso path"):
+        giso.mcp(ENDPOINT)
+
+    assert not giso.operations
+    assert not giso.provenance
+
+
+def test_mcp_prompt_input_required_is_explicitly_unimplemented(monkeypatch):
+    def handler(payload, headers, allow_empty):
+        if payload["method"] == "server/discover":
+            result = modern_discover()
+            result["result"]["capabilities"]["prompts"] = {}
+            return response(result)
+        if payload["method"] == "tools/list":
+            return response(rpc_result(payload["id"], {"tools": [tool()]}))
+        if payload["method"] == "prompts/list":
+            return response(rpc_result(payload["id"], {"prompts": [prompt()]}))
+        if payload["method"] == "prompts/get":
+            return response(rpc_result(payload["id"], {
+                "resultType": "input_required",
+                "inputRequests": {
+                    "clarify": {
+                        "method": "elicitation/create",
+                        "params": {"message": "More detail?"},
+                    }
+                },
+                "requestState": "opaque",
+            }))
+        raise AssertionError(payload)
+
+    McpHttpHarness(monkeypatch, handler)
+    giso = Giso().mcp(ENDPOINT)
+
+    with pytest.raises(
+        mcp_module.McpExecutionError,
+        match="input_required continuation is not implemented",
+    ):
+        giso.prompts.code_review(code="x")
