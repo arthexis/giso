@@ -1824,3 +1824,210 @@ def test_mcp_resource_template_only_server_is_accepted(monkeypatch):
     assert giso.resource_templates.user.profile.mcp_resource_template.name == (
         "user.profile"
     )
+
+
+def completion_harness(monkeypatch, *, legacy=False):
+    def handler(payload, headers, allow_empty):
+        method = payload["method"]
+        if method == "server/discover":
+            if legacy:
+                return response({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "error": {"code": -32601, "message": "Method not found"},
+                })
+            result = modern_discover()
+            result["result"]["capabilities"]["prompts"] = {}
+            result["result"]["capabilities"]["resources"] = {}
+            result["result"]["capabilities"]["completions"] = {}
+            return response(result)
+        if method == "initialize":
+            return response(
+                rpc_result(2, {
+                    "protocolVersion": "2025-11-25",
+                    "serverInfo": {"name": "legacy-mcp"},
+                    "capabilities": {
+                        "tools": {},
+                        "prompts": {},
+                        "resources": {},
+                        "completions": {},
+                    },
+                }),
+                headers={
+                    "Content-Type": "application/json",
+                    "MCP-Session-Id": "completion-session",
+                },
+            )
+        if method == "notifications/initialized":
+            return response("", status=202)
+        if method == "tools/list":
+            return response(rpc_result(payload["id"], {"tools": []}))
+        if method == "prompts/list":
+            return response(rpc_result(payload["id"], {"prompts": [prompt()]}))
+        if method == "resources/templates/list":
+            return response(rpc_result(payload["id"], {
+                "resourceTemplates": [resource_template()]
+            }))
+        if method == "resources/list":
+            return response(rpc_result(payload["id"], {"resources": []}))
+        if method == "completion/complete":
+            argument = payload["params"]["argument"]
+            values = {
+                "language": ["python", "perl"],
+                "detail": ["full", "summary"],
+            }.get(argument["name"], [])
+            matches = [
+                value for value in values
+                if value.startswith(argument["value"])
+            ]
+            return response(rpc_result(payload["id"], {
+                "completion": {
+                    "values": matches,
+                    "total": len(matches),
+                    "hasMore": False,
+                }
+            }))
+        raise AssertionError(payload)
+
+    return McpHttpHarness(monkeypatch, handler)
+
+
+def test_mcp_prompt_completion_is_folded_when_capability_is_advertised(monkeypatch):
+    completion_harness(monkeypatch)
+    giso = Giso().mcp(ENDPOINT)
+
+    result = giso.prompts.code_review.complete("language", "p")
+
+    assert result == mcp_module.McpCompletion(
+        values=("python", "perl"),
+        total=2,
+        has_more=False,
+    )
+
+
+def test_mcp_resource_template_completion_uses_template_reference(monkeypatch):
+    seen = {}
+
+    def handler(payload, headers, allow_empty):
+        method = payload["method"]
+        if method == "server/discover":
+            result = modern_discover()
+            result["result"]["capabilities"] = {
+                "resources": {},
+                "completions": {},
+            }
+            return response(result)
+        if method == "tools/list":
+            return response(rpc_result(payload["id"], {"tools": []}))
+        if method == "resources/templates/list":
+            return response(rpc_result(payload["id"], {
+                "resourceTemplates": [resource_template()]
+            }))
+        if method == "resources/list":
+            return response(rpc_result(payload["id"], {"resources": []}))
+        if method == "completion/complete":
+            seen.update(payload["params"])
+            assert headers["Mcp-Method"] == "completion/complete"
+            assert headers["Mcp-Name"] == "users://{user_id}/profile{?detail}"
+            return response(rpc_result(payload["id"], {
+                "completion": {
+                    "values": ["full"],
+                    "total": 1,
+                    "hasMore": False,
+                }
+            }))
+        raise AssertionError(payload)
+
+    McpHttpHarness(monkeypatch, handler)
+    giso = Giso().mcp(ENDPOINT)
+
+    result = giso.resource_templates.user.profile.complete(
+        "detail",
+        "f",
+        context={"user_id": "alice"},
+    )
+
+    assert seen["ref"] == {
+        "type": "ref/resource",
+        "uri": "users://{user_id}/profile{?detail}",
+    }
+    assert seen["argument"] == {"name": "detail", "value": "f"}
+    assert seen["context"] == {"arguments": {"user_id": "alice"}}
+    assert result.values == ("full",)
+
+
+def test_mcp_completion_uses_legacy_session(monkeypatch):
+    completion_harness(monkeypatch, legacy=True)
+    giso = Giso().mcp(ENDPOINT)
+
+    result = giso.prompts.code_review.complete("language", "p")
+
+    assert result.values == ("python", "perl")
+
+
+def test_mcp_completion_is_absent_without_capability(monkeypatch):
+    prompt_harness(monkeypatch)
+    resource_template_harness(monkeypatch)
+    prompt_giso = Giso().mcp(ENDPOINT)
+
+    assert not hasattr(prompt_giso.prompts.code_review, "complete")
+
+
+@pytest.mark.parametrize(
+    ("call", "message"),
+    [
+        (lambda op: op.complete("unknown", "x"), "has no argument"),
+        (lambda op: op.complete("language", 3), "value must be a string"),
+        (
+            lambda op: op.complete(
+                "language",
+                "p",
+                context={"unknown": "x"},
+            ),
+            "unknown argument",
+        ),
+        (
+            lambda op: op.complete(
+                "language",
+                "p",
+                context={"code": 3},
+            ),
+            "names and values must be strings",
+        ),
+    ],
+)
+def test_mcp_completion_arguments_are_validated(monkeypatch, call, message):
+    completion_harness(monkeypatch)
+    operation = Giso().mcp(ENDPOINT).prompts.code_review
+
+    with pytest.raises(McpInspectionError, match=message):
+        call(operation)
+
+
+def test_mcp_completion_surfaces_rpc_error(monkeypatch):
+    def handler(payload, headers, allow_empty):
+        method = payload["method"]
+        if method == "server/discover":
+            result = modern_discover()
+            result["result"]["capabilities"] = {
+                "prompts": {},
+                "completions": {},
+            }
+            return response(result)
+        if method == "tools/list":
+            return response(rpc_result(payload["id"], {"tools": []}))
+        if method == "prompts/list":
+            return response(rpc_result(payload["id"], {"prompts": [prompt()]}))
+        if method == "completion/complete":
+            return response({
+                "jsonrpc": "2.0",
+                "id": payload["id"],
+                "error": {"code": -32602, "message": "invalid completion"},
+            })
+        raise AssertionError(payload)
+
+    McpHttpHarness(monkeypatch, handler)
+    giso = Giso().mcp(ENDPOINT)
+
+    with pytest.raises(mcp_module.McpExecutionError, match="invalid completion"):
+        giso.prompts.code_review.complete("language", "p")
