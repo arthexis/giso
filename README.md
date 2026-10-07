@@ -206,9 +206,18 @@ assert request.args == {
 }
 ```
 
-`prepare()` validates documented option names, required options, aliases, simple documented types, and choices. Aliases are normalized to their canonical option names. Documented defaults are intentionally not injected into the request; default handling remains Ansible's responsibility when execution is eventually added.
+`prepare()` validates documented option names, required options, aliases, simple documented types, and choices. Aliases are normalized to their canonical option names. Documented defaults are intentionally not injected into the request; default handling remains Ansible's responsibility.
 
-Directly calling the module operation still raises `AnsibleInspectionError`. Inspection and preparation never execute a module, access inventory, or mutate a host.
+A prepared request can be executed explicitly against localhost:
+
+```python
+request = nmcli.prepare(conn_name="wired", state="present")
+result = g.execute(request)
+```
+
+`execute()` requires an `AnsibleModuleRequest`, invokes the installed `ansible` command with an implicit one-host localhost inventory and local connection, and reads the structured host result from Ansible's `--tree` output. Successful results are recorded under `ansible.localhost.<fqcn>` in `g.results`. Module failures raise `AnsibleExecutionError` and preserve the returned Ansible result on the exception.
+
+Directly calling the module operation still raises `AnsibleInspectionError`; execution remains explicit through `prepare()` followed by `execute()`. Inventory binding, remote hosts, plays, roles, and playbooks are not part of this slice.
 
 ## OpenAPI
 
