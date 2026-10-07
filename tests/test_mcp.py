@@ -1564,3 +1564,263 @@ def test_mcp_prompt_input_required_is_explicitly_unimplemented(monkeypatch):
         match="input_required continuation is not implemented",
     ):
         giso.prompts.code_review(code="x")
+
+
+def resource_template(
+    uri_template="users://{user_id}/profile{?detail}",
+    *,
+    name="user.profile",
+    mime_type="application/json",
+):
+    return {
+        "uriTemplate": uri_template,
+        "name": name,
+        "title": "User profile",
+        "description": "Profile by user ID",
+        "mimeType": mime_type,
+        "icons": [
+            {
+                "src": "https://example.test/profile.png",
+                "mimeType": "image/png",
+                "sizes": ["32x32"],
+            }
+        ],
+        "annotations": {"audience": ["assistant"]},
+    }
+
+
+def resource_template_harness(monkeypatch, templates=None):
+    templates = [resource_template()] if templates is None else templates
+
+    def handler(payload, headers, allow_empty):
+        method = payload["method"]
+        if method == "server/discover":
+            result = modern_discover()
+            result["result"]["capabilities"]["resources"] = {}
+            return response(result)
+        if method == "tools/list":
+            return response(rpc_result(payload["id"], {"tools": [tool()]}))
+        if method == "resources/templates/list":
+            return response(
+                rpc_result(payload["id"], {"resourceTemplates": templates})
+            )
+        if method == "resources/list":
+            return response(rpc_result(payload["id"], {"resources": []}))
+        if method == "resources/read":
+            uri = payload["params"]["uri"]
+            return response(rpc_result(payload["id"], {
+                "contents": [{
+                    "uri": uri,
+                    "mimeType": "application/json",
+                    "text": "{\"ok\":true}",
+                }]
+            }))
+        raise AssertionError(payload)
+
+    return McpHttpHarness(monkeypatch, handler)
+
+
+def test_mcp_resource_templates_are_discovered_and_folded(monkeypatch):
+    resource_template_harness(monkeypatch)
+
+    giso = Giso().mcp(ENDPOINT)
+
+    operation = giso.resource_templates.user.profile
+    spec = operation.mcp_resource_template
+    assert spec.uri_template == "users://{user_id}/profile{?detail}"
+    assert spec.name == "user.profile"
+    assert spec.variables == ("user_id", "detail")
+    assert spec.mime_type == "application/json"
+    assert spec.icons[0]["mimeType"] == "image/png"
+    assert spec.annotations == {"audience": ["assistant"]}
+    assert giso.provenance[0]["resource_templates"] == (
+        "users://{user_id}/profile{?detail}"
+    )
+
+
+def test_mcp_resource_template_signature_uses_uri_variables(monkeypatch):
+    resource_template_harness(monkeypatch)
+
+    signature = inspect.signature(
+        Giso().mcp(ENDPOINT).resource_templates.user.profile
+    )
+
+    assert tuple(signature.parameters) == ("user_id", "detail")
+    assert signature.parameters["user_id"].default is None
+    assert signature.parameters["detail"].default is None
+
+
+def test_mcp_resource_template_expands_and_reads(monkeypatch):
+    seen = {}
+
+    def handler(payload, headers, allow_empty):
+        method = payload["method"]
+        if method == "server/discover":
+            result = modern_discover()
+            result["result"]["capabilities"]["resources"] = {}
+            return response(result)
+        if method == "tools/list":
+            return response(rpc_result(payload["id"], {"tools": []}))
+        if method == "resources/templates/list":
+            return response(rpc_result(payload["id"], {
+                "resourceTemplates": [resource_template()]
+            }))
+        if method == "resources/list":
+            return response(rpc_result(payload["id"], {"resources": []}))
+        if method == "resources/read":
+            seen["uri"] = payload["params"]["uri"]
+            assert headers["Mcp-Name"] == seen["uri"]
+            return response(rpc_result(payload["id"], {
+                "contents": [{
+                    "uri": seen["uri"],
+                    "text": "profile",
+                }]
+            }))
+        raise AssertionError(payload)
+
+    McpHttpHarness(monkeypatch, handler)
+    giso = Giso().mcp(ENDPOINT)
+
+    result = giso.resource_templates.user.profile(
+        user_id="alice smith",
+        detail="full",
+    )
+
+    assert seen["uri"] == "users://alice%20smith/profile?detail=full"
+    assert result.value == "profile"
+
+
+def test_mcp_resource_template_omits_undefined_optional_variables(monkeypatch):
+    resource_template_harness(monkeypatch)
+    giso = Giso().mcp(ENDPOINT)
+
+    result = giso.resource_templates.user.profile(user_id="alice")
+
+    assert result.uri == "users://alice/profile"
+
+
+def test_mcp_resource_templates_list_is_paginated(monkeypatch):
+    def handler(payload, headers, allow_empty):
+        method = payload["method"]
+        if method == "server/discover":
+            result = modern_discover()
+            result["result"]["capabilities"]["resources"] = {}
+            return response(result)
+        if method == "tools/list":
+            return response(rpc_result(payload["id"], {"tools": []}))
+        if method == "resources/templates/list":
+            cursor = payload["params"].get("cursor")
+            if cursor is None:
+                return response(rpc_result(payload["id"], {
+                    "resourceTemplates": [resource_template(name="user.profile")],
+                    "nextCursor": "page-2",
+                }))
+            assert cursor == "page-2"
+            return response(rpc_result(payload["id"], {
+                "resourceTemplates": [
+                    resource_template(
+                        uri_template="orders://{order_id}",
+                        name="order.detail",
+                    )
+                ]
+            }))
+        if method == "resources/list":
+            return response(rpc_result(payload["id"], {"resources": []}))
+        raise AssertionError(payload)
+
+    McpHttpHarness(monkeypatch, handler)
+    giso = Giso().mcp(ENDPOINT)
+
+    assert giso.resource_templates.user.profile.mcp_resource_template.name == (
+        "user.profile"
+    )
+    assert giso.resource_templates.order.detail.mcp_resource_template.name == (
+        "order.detail"
+    )
+
+
+def test_mcp_resource_template_unknown_variables_are_rejected(monkeypatch):
+    resource_template_harness(monkeypatch)
+    operation = Giso().mcp(ENDPOINT).resource_templates.user.profile
+
+    with pytest.raises(McpInspectionError, match="has no variable"):
+        operation(user_id="alice", unknown="x")
+
+
+@pytest.mark.parametrize(
+    ("template", "values", "expected"),
+    [
+        ("{var}", {"var": "value"}, "value"),
+        ("{+path}", {"path": "/foo/bar"}, "/foo/bar"),
+        ("{#path}", {"path": "/foo/bar"}, "#/foo/bar"),
+        ("X{.var}", {"var": "value"}, "X.value"),
+        ("{/segments*}", {"segments": ["a", "b"]}, "/a/b"),
+        ("{;x,y}", {"x": "1024", "y": "768"}, ";x=1024;y=768"),
+        ("{?q,limit}", {"q": "a b", "limit": 10}, "?q=a%20b&limit=10"),
+        ("{&q}", {"q": "a b"}, "&q=a%20b"),
+        (
+            "{?keys*}",
+            {"keys": {"semi": ";", "dot": "."}},
+            "?semi=%3B&dot=.",
+        ),
+        ("{var:3}", {"var": "abcdef"}, "abc"),
+    ],
+)
+def test_mcp_resource_template_rfc6570_expansion(template, values, expected):
+    assert Giso._expand_uri_template(template, values) == expected
+
+
+def test_mcp_resource_template_path_collisions_are_rejected_atomically(monkeypatch):
+    templates = [
+        resource_template(uri_template="user://{id}", name="user-profile"),
+        resource_template(uri_template="account://{id}", name="user_profile"),
+    ]
+
+    def handler(payload, headers, allow_empty):
+        if payload["method"] == "server/discover":
+            result = modern_discover()
+            result["result"]["capabilities"]["resources"] = {}
+            return response(result)
+        if payload["method"] == "tools/list":
+            return response(rpc_result(payload["id"], {"tools": []}))
+        if payload["method"] == "resources/templates/list":
+            return response(rpc_result(payload["id"], {
+                "resourceTemplates": templates
+            }))
+        if payload["method"] == "resources/list":
+            return response(rpc_result(payload["id"], {"resources": []}))
+        raise AssertionError(payload)
+
+    McpHttpHarness(monkeypatch, handler)
+    giso = Giso()
+
+    with pytest.raises(McpInspectionError, match="same Giso path"):
+        giso.mcp(ENDPOINT)
+
+    assert not giso.operations
+    assert not giso.provenance
+
+
+def test_mcp_resource_template_only_server_is_accepted(monkeypatch):
+    def handler(payload, headers, allow_empty):
+        if payload["method"] == "server/discover":
+            result = modern_discover()
+            result["result"]["capabilities"] = {"resources": {}}
+            return response(result)
+        if payload["method"] == "tools/list":
+            return response(rpc_result(payload["id"], {"tools": []}))
+        if payload["method"] == "resources/templates/list":
+            return response(rpc_result(payload["id"], {
+                "resourceTemplates": [resource_template()]
+            }))
+        if payload["method"] == "resources/list":
+            return response(rpc_result(payload["id"], {"resources": []}))
+        raise AssertionError(payload)
+
+    McpHttpHarness(monkeypatch, handler)
+
+    giso = Giso().mcp(ENDPOINT)
+
+    assert giso.resource_templates.user.profile.mcp_resource_template.name == (
+        "user.profile"
+    )
