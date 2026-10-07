@@ -212,7 +212,12 @@ class Giso(DistributionGiso):
                 message = f"Ansible execution failed for {request.fqcn}"
                 if detail:
                     message += f": {detail}"
-                raise AnsibleExecutionError(message, result=results)
+                error_result: Mapping[str, Any]
+        if len(results) == 1:
+            error_result = next(iter(results.values()))
+        else:
+            error_result = results
+        raise AnsibleExecutionError(message, result=error_result)
             return results
 
     @staticmethod
