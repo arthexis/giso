@@ -30,6 +30,78 @@ class McpExecutionError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class McpSubscriptionEvent:
+    """One notification delivered by subscriptions/listen."""
+
+    method: str
+    params: Mapping[str, Any]
+    subscription_id: Any
+
+    @property
+    def resource_uri(self) -> str | None:
+        uri = self.params.get("uri")
+        return uri if isinstance(uri, str) else None
+
+
+class McpSubscription:
+    """Explicit handle for one modern MCP subscription stream."""
+
+    def __init__(
+        self,
+        *,
+        owner: "Giso",
+        endpoint: str,
+        headers: Mapping[str, str],
+        session: "_McpSession",
+        request_id: int,
+        stream: Any,
+        acknowledged: Mapping[str, Any],
+    ):
+        self.owner = owner
+        self.endpoint = endpoint
+        self.headers = dict(headers)
+        self.session = session
+        self.request_id = request_id
+        self.stream = stream
+        self.acknowledged = dict(acknowledged)
+        self.closed = False
+
+    def next(self) -> McpSubscriptionEvent:
+        if self.closed:
+            raise McpExecutionError("MCP subscription is closed")
+        message = self.owner._read_mcp_sse_message(self.stream)
+        if message is None:
+            self.closed = True
+            raise McpExecutionError("MCP subscription stream closed")
+        method = message.get("method")
+        params = message.get("params")
+        if not isinstance(method, str) or not isinstance(params, dict):
+            raise McpExecutionError("MCP subscription returned invalid notification")
+        meta = params.get("_meta")
+        subscription_id = (
+            meta.get("io.modelcontextprotocol/subscriptionId")
+            if isinstance(meta, dict)
+            else None
+        )
+        if subscription_id != self.request_id:
+            raise McpExecutionError("MCP subscription notification has wrong subscriptionId")
+        if method == "notifications/cancelled":
+            self.closed = True
+        return McpSubscriptionEvent(method, dict(params), subscription_id)
+
+    def refresh(self) -> "Giso":
+        """Return a fresh MCP snapshot using the same endpoint and auth headers."""
+        return type(self.owner)().mcp(self.endpoint, headers=self.headers)
+
+    def close(self) -> None:
+        if not self.closed:
+            close = getattr(self.stream, "close", None)
+            if callable(close):
+                close()
+            self.closed = True
+
+
+@dataclass(frozen=True)
 class McpCompletion:
     """Completion suggestions returned by completion/complete."""
 
@@ -371,7 +443,160 @@ class Giso(AnsibleGiso):
             child.provenance.append(provenance)
         self.fold(child)
         self.mcp_server = server_spec
+        self._mcp_context = (endpoint, dict(private_headers), session)
         return self
+
+    def subscribe(
+        self,
+        *,
+        tools: bool = False,
+        prompts: bool = False,
+        resources: bool = False,
+        resource_uris: tuple[str, ...] | list[str] = (),
+    ) -> McpSubscription:
+        """Open one explicit 2026-07-28 subscriptions/listen stream."""
+        context = getattr(self, "_mcp_context", None)
+        if context is None:
+            raise McpInspectionError("MCP subscription requires an inspected MCP source")
+        endpoint, headers, session = context
+        if session.era != "modern":
+            raise McpInspectionError(
+                "subscriptions/listen requires MCP 2026-07-28"
+            )
+
+        notifications: dict[str, Any] = {}
+        tool_capability = session.capabilities.get("tools")
+        if tools and isinstance(tool_capability, dict) and tool_capability.get("listChanged") is True:
+            notifications["toolsListChanged"] = True
+        prompt_capability = session.capabilities.get("prompts")
+        if prompts and isinstance(prompt_capability, dict) and prompt_capability.get("listChanged") is True:
+            notifications["promptsListChanged"] = True
+        resource_capability = session.capabilities.get("resources")
+        if resources and isinstance(resource_capability, dict) and resource_capability.get("listChanged") is True:
+            notifications["resourcesListChanged"] = True
+        if resource_uris:
+            if not (
+                isinstance(resource_capability, dict)
+                and resource_capability.get("subscribe") is True
+            ):
+                raise McpInspectionError(
+                    "MCP server does not support resource subscriptions"
+                )
+            if not all(isinstance(uri, str) and uri for uri in resource_uris):
+                raise McpInspectionError(
+                    "MCP resource subscription URIs must be non-empty strings"
+                )
+            notifications["resourceSubscriptions"] = list(resource_uris)
+        if not notifications:
+            raise McpInspectionError(
+                "MCP server supports none of the requested subscription notifications"
+            )
+
+        request_id = 300
+        payload = self._modern_request_payload(
+            "subscriptions/listen",
+            request_id=request_id,
+            params={"notifications": notifications},
+        )
+        stream = self._open_mcp_subscription_stream(
+            endpoint,
+            payload,
+            headers={
+                **headers,
+                "MCP-Protocol-Version": session.protocol_version,
+                "Mcp-Method": "subscriptions/listen",
+            },
+        )
+        first = self._read_mcp_sse_message(stream)
+        if first is None or first.get("method") != "notifications/subscriptions/acknowledged":
+            close = getattr(stream, "close", None)
+            if callable(close):
+                close()
+            raise McpExecutionError(
+                "MCP subscription was not acknowledged as the first stream event"
+            )
+        params = first.get("params")
+        if not isinstance(params, dict):
+            raise McpExecutionError("MCP subscription acknowledgement has invalid params")
+        meta = params.get("_meta")
+        subscription_id = (
+            meta.get("io.modelcontextprotocol/subscriptionId")
+            if isinstance(meta, dict)
+            else None
+        )
+        if subscription_id != request_id:
+            raise McpExecutionError(
+                "MCP subscription acknowledgement has wrong subscriptionId"
+            )
+        acknowledged = params.get("notifications")
+        if not isinstance(acknowledged, dict):
+            acknowledged = {}
+        return McpSubscription(
+            owner=self,
+            endpoint=endpoint,
+            headers=headers,
+            session=session,
+            request_id=request_id,
+            stream=stream,
+            acknowledged=acknowledged,
+        )
+
+    @classmethod
+    def _open_mcp_subscription_stream(
+        cls,
+        endpoint: str,
+        payload: Mapping[str, Any],
+        *,
+        headers: Mapping[str, str],
+    ) -> Any:
+        request = urllib.request.Request(
+            endpoint,
+            data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "text/event-stream",
+                **headers,
+            },
+            method="POST",
+        )
+        try:
+            response = urllib.request.urlopen(request, timeout=30)
+        except (OSError, urllib.error.URLError) as exc:
+            raise McpExecutionError(
+                f"Cannot open MCP subscription at {endpoint!r}"
+            ) from exc
+        content_type = response.headers.get("Content-Type", "")
+        if "text/event-stream" not in content_type:
+            response.close()
+            raise McpExecutionError(
+                "MCP subscriptions/listen did not return text/event-stream"
+            )
+        return response
+
+    @classmethod
+    def _read_mcp_sse_message(cls, stream: Any) -> Mapping[str, Any] | None:
+        data_lines: list[str] = []
+        while True:
+            raw = stream.readline()
+            if raw in (b"", ""):
+                if not data_lines:
+                    return None
+                break
+            line = raw.decode("utf-8") if isinstance(raw, bytes) else raw
+            line = line.rstrip("\r\n")
+            if not line:
+                if data_lines:
+                    break
+                continue
+            if line.startswith("data:"):
+                data_lines.append(line[5:].lstrip())
+        try:
+            message = json.loads("\n".join(data_lines))
+        except json.JSONDecodeError as exc:
+            raise McpExecutionError("MCP subscription returned invalid SSE JSON") from exc
+        if not isinstance(message, dict) or message.get("jsonrpc") != "2.0":
+            raise McpExecutionError("MCP subscription returned invalid JSON-RPC message")
+        return message
 
     def execute(self, request: Any) -> Any:
         """Execute or continue MCP requests, otherwise delegate to parent request types."""
