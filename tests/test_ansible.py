@@ -20,8 +20,8 @@ MODULE_DOCS = {
             "short_description": "Manage networking with nmcli",
             "description": ["Create and modify NetworkManager connections."],
             "options": {
-                "conn_name": {"type": "str", "required": True},
-                "state": {"type": "str", "default": "present"},
+                "conn_name": {"type": "str", "required": True, "aliases": ["name"]},
+                "state": {"type": "str", "default": "present", "choices": ["present", "absent"]},
                 "autoconnect": {"type": "bool"},
                 "_internal": {"type": "str"},
                 "not-valid": {"type": "str"},
@@ -152,3 +152,66 @@ def test_ansible_doc_is_optional_until_resolver_is_used(monkeypatch):
 
     with pytest.raises(AnsibleInspectionError, match="requires ansible-doc"):
         Giso._run_ansible_doc("-t", "module", "-l", "-j", "community.general")
+
+
+def test_ansible_prepare_returns_validated_request(monkeypatch):
+    patch_ansible_doc(monkeypatch)
+    operation = Giso().ansible("community.general").community.general.modules.nmcli
+
+    request = operation.prepare(conn_name="eth0", state="present", autoconnect=True)
+
+    assert request.fqcn == "community.general.nmcli"
+    assert request.args == {
+        "conn_name": "eth0",
+        "state": "present",
+        "autoconnect": True,
+    }
+    assert not Giso().results.history
+
+
+def test_ansible_prepare_normalizes_aliases(monkeypatch):
+    patch_ansible_doc(monkeypatch)
+    operation = Giso().ansible("community.general").community.general.modules.nmcli
+
+    request = operation.prepare(name="eth0")
+
+    assert request.args == {"conn_name": "eth0"}
+
+
+def test_ansible_prepare_does_not_inject_documented_defaults(monkeypatch):
+    patch_ansible_doc(monkeypatch)
+    operation = Giso().ansible("community.general").community.general.modules.nmcli
+
+    request = operation.prepare(conn_name="eth0")
+
+    assert request.args == {"conn_name": "eth0"}
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({}, "missing required"),
+        ({"conn_name": "eth0", "unknown": 1}, "no documented option"),
+        ({"conn_name": "eth0", "name": "eth1"}, "supplied more than once"),
+        ({"conn_name": 3}, "expects str"),
+        ({"conn_name": "eth0", "autoconnect": "yes"}, "expects bool"),
+        ({"conn_name": "eth0", "state": "invalid"}, "must be one of"),
+    ],
+)
+def test_ansible_prepare_rejects_invalid_requests(monkeypatch, kwargs, message):
+    patch_ansible_doc(monkeypatch)
+    operation = Giso().ansible("community.general").community.general.modules.nmcli
+
+    with pytest.raises(AnsibleInspectionError, match=message):
+        operation.prepare(**kwargs)
+
+
+def test_ansible_prepare_works_under_named_branch(monkeypatch):
+    patch_ansible_doc(monkeypatch)
+    giso = Giso(automation="ansible:community.general")
+
+    request = giso.automation.community.general.modules.nmcli.prepare(name="eth0")
+
+    assert request.fqcn == "community.general.nmcli"
+    assert request.args == {"conn_name": "eth0"}
+    assert not giso.results.history
