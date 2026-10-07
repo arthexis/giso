@@ -165,7 +165,13 @@ class Giso(DistributionGiso):
                 for name in sorted(os.listdir(tree))
                 if os.path.isfile(os.path.join(tree, name))
             ]
-            if len(result_files) != 1:
+            if not result_files:
+                detail = completed.stderr.strip() or completed.stdout.strip()
+                message = f"Ansible returned no valid result for {request.fqcn}"
+                if detail:
+                    message += f": {detail}"
+                raise AnsibleExecutionError(message)
+            if len(result_files) > 1:
                 raise AnsibleExecutionError(
                     f"Ansible target {request.context.host!r} produced "
                     f"{len(result_files)} host results; exactly one is required"
