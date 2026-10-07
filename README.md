@@ -378,6 +378,6 @@ Raw Python source strings are not accepted by `fold()`; use `Giso.compile(...)` 
 
 Imported callables from a folded module are ignored; only functions and classes defined by that module are attached. Private package paths are skipped.
 
-`fold()` mutates the existing object and returns the same `Giso`, so notebook-style incremental construction works naturally. Direct resolver methods such as `distribution()`, `github()`, `pypi()`, `openapi()`, and `soap()` follow the same fluent convention.
+`fold()` mutates the existing object and returns the same `Giso`, so notebook-style incremental construction works naturally. Direct resolver methods such as `distribution()`, `github()`, `pypi()`, `mcp()`, `openapi()`, and `soap()` follow the same fluent convention.
 
 The project intentionally has no third-party runtime dependencies and no CLI, MCP server, deployment machinery, or application-specific integrations. The goal remains narrow: explore a live object that can fold software and described external capability surfaces into one callable namespace.
