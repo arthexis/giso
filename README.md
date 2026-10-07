@@ -338,7 +338,22 @@ Each resource reader carries an `McpResourceSpec` in `.mcp_resource`. `resources
 
 `read()` sends `resources/read` with the resource URI. Modern requests use `Mcp-Method: resources/read` and `Mcp-Name: <resource URI>`; legacy requests preserve the negotiated session headers. A single returned content item becomes one `McpResourceContent`; multiple contents return a list. Text remains text, while MCP blob contents are strict-base64 decoded to `bytes`. URI, MIME type, and annotations are preserved alongside the decoded value.
 
-Resource templates, subscriptions/listen, list-change notifications, and `input_required` continuation for resource reads are not part of this slice.
+Resource templates are also discovered through paginated `resources/templates/list` and folded under a separate namespace:
+
+```python
+profile = g.resource_templates.user.profile(
+    user_id="alice",
+    detail="full",
+)
+```
+
+Each callable carries an `McpResourceTemplateSpec` in `.mcp_resource_template`, including the RFC 6570 URI template, advertised metadata, annotations, and icons. Its keyword-only signature is derived from the template variables. Undefined variables default to `None` and are omitted according to RFC 6570 expansion semantics.
+
+Giso expands RFC 6570 operators, scalar/list/map values, explode modifiers, and prefix modifiers using stdlib URI quoting, then reuses the ordinary `resources/read` path for the resulting concrete URI. Unknown template variables fail before any request is sent.
+
+Resource template path normalization and collision handling are atomic, template-only MCP servers are accepted, and discovered URI templates are included in MCP provenance. Completion suggestions for template arguments remain a separate slice.
+
+Subscriptions/listen, list-change notifications, and `input_required` continuation for resource reads are not part of this slice.
 
 MCP prompts are discovered when the server advertises the `prompts` capability. They are folded under `g.prompts` and remain explicitly user-invoked, matching MCP's prompt interaction model. `prompts/list` is paginated.
 
