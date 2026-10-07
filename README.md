@@ -250,6 +250,46 @@ Every concrete host result is recorded under `ansible.<host>.<fqcn>`. Multi-host
 
 Directly calling the module operation still raises `AnsibleInspectionError`; execution remains explicit through `prepare()` followed by `execute()`. Plays, roles, and playbooks are not part of this slice.
 
+## MCP inspection
+
+Streamable HTTP MCP servers can be folded as read-only capability sources:
+
+```python
+g = Giso("mcp:https://example.com/mcp")
+
+# equivalent explicit resolver
+h = Giso().mcp("https://example.com/mcp")
+```
+
+Giso negotiates the MCP protocol before listing tools. It first probes the modern `2026-07-28` lifecycle with `server/discover`; if the endpoint reports that method as unsupported, it falls back to the legacy `initialize` handshake and preserves the negotiated session ID and protocol version for `tools/list`.
+
+Tool names map to normal Giso operation paths. Dotted MCP names preserve hierarchy, while non-Python characters are normalized deterministically. Normalization collisions fail explicitly instead of silently overwriting one tool with another.
+
+Each operation carries an `McpToolSpec` in `.mcp_tool`, a docstring from the MCP tool description, and a Python signature derived from the tool's JSON Schema `inputSchema`.
+
+An inspected tool can prepare a validated request without calling the server:
+
+```python
+request = g.charger.status.prepare(
+    charger_id="cp-1",
+    verbose=True,
+)
+
+assert request.name == "charger.status"
+assert request.arguments == {
+    "charger_id": "cp-1",
+    "verbose": True,
+}
+```
+
+`prepare()` validates the practical JSON Schema subset needed for MCP tool inputs: required properties, primitive types, nullable type unions, `enum`, `const`, arrays/items, nested objects, and `additionalProperties`. Schema defaults are deliberately not injected; prepared requests contain only caller-supplied arguments.
+
+The resulting `McpToolRequest` retains the endpoint, negotiated protocol era/version, legacy session ID when present, and private request headers so a later execution slice can send `tools/call` without renegotiating the request context.
+
+Directly calling an MCP-backed operation still raises `McpInspectionError`; `tools/call`, resources, prompts, subscriptions, and stdio transport are not implemented yet.
+
+The negotiated endpoint metadata is available as `g.mcp_server`. MCP provenance records the endpoint, protocol era/version, and discovered tool names. Optional HTTP headers can be supplied to `mcp(..., headers={...})` for authentication; header values remain private and are never copied into provenance. Remote endpoints require HTTPS, while loopback HTTP is allowed for local development.
+
 ## OpenAPI
 
 OpenAPI 3.x JSON descriptions can be loaded from local files or HTTPS sources:
@@ -369,6 +409,7 @@ Exhausted sources are discarded. Live iterator state is intentionally not cloned
 - PyPI references using `pypi:project[@version]`
 - OpenAPI 3.x JSON descriptions using `openapi:<source>`
 - WSDL 1.1 SOAP descriptions using `soap:<source>`
+- Streamable HTTP MCP servers using `mcp:<endpoint>`
 - nested lists/tuples/sets
 - finite-looking `Sized` iterables
 - deferred iterators/generators
