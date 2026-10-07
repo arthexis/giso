@@ -180,6 +180,76 @@ g.pypi("requests", version="2.32.5")
 
 GitHub references resolve to an exact commit before folding. PyPI references select a verified release artifact and reuse the archive pipeline. Neither resolver installs software into the Python environment.
 
+## Ansible inspection
+
+Installed Ansible collections can be inspected without importing Ansible internals or executing modules:
+
+```python
+g = Giso().ansible("community.general")
+nmcli = g.community.general.modules.nmcli
+```
+
+Giso uses the installed `ansible-doc` command to discover modules and their documentation. Each module is exposed as an inspection-only operation with an `AnsibleModuleSpec`, generated docstring, and Python signature derived from documented options.
+
+A module operation can prepare a validated request without executing Ansible:
+
+```python
+request = nmcli.prepare(
+    conn_name="wired",
+    state="present",
+)
+
+assert request.fqcn == "community.general.nmcli"
+assert request.args == {
+    "conn_name": "wired",
+    "state": "present",
+}
+```
+
+`prepare()` validates documented option names, required options, aliases, simple documented types, and choices. Aliases are normalized to their canonical option names. Documented defaults are intentionally not injected into the request; default handling remains Ansible's responsibility.
+
+A prepared request can be executed explicitly. With no execution context, Giso keeps the original localhost behavior:
+
+```python
+g = Giso().ansible("community.general")
+request = g.community.general.modules.nmcli.prepare(conn_name="wired")
+result = g.execute(request)
+```
+
+For an inventory-backed target, bind one host when inspecting the collection:
+
+```python
+g = Giso().ansible(
+    "community.general",
+    inventory="./inventory.yml",
+    host="gway-004",
+)
+
+request = g.community.general.modules.nmcli.prepare(conn_name="wired")
+result = g.execute(request)
+```
+
+The bound host, inventory source, and optional connection are carried by the `AnsibleModuleRequest`. If no explicit connection is supplied, Ansible resolves connection settings from inventory/configuration. Giso invokes the installed `ansible` command and reads structured host results from Ansible's `--tree` output.
+
+The bound host may also be an Ansible group or host pattern:
+
+```python
+g = Giso().ansible(
+    "community.general",
+    inventory="./inventory.yml",
+    host="chargers",
+)
+
+request = g.community.general.modules.nmcli.prepare(conn_name="wired")
+results = g.execute(request)
+```
+
+When exactly one concrete host responds, `execute()` preserves the single-host API and returns that host's result mapping directly. When multiple hosts respond, it returns `{hostname: result}` in deterministic host-name order.
+
+Every concrete host result is recorded under `ansible.<host>.<fqcn>`. Multi-host runs are also recorded as an aggregate under `ansible.<pattern>.<fqcn>`. If any host reports `failed` or `unreachable`, Giso records all host results and then raises `AnsibleExecutionError`; for multi-host failures, `exc.result` contains the complete host-to-result mapping, including successful hosts.
+
+Directly calling the module operation still raises `AnsibleInspectionError`; execution remains explicit through `prepare()` followed by `execute()`. Plays, roles, and playbooks are not part of this slice.
+
 ## OpenAPI
 
 OpenAPI 3.x JSON descriptions can be loaded from local files or HTTPS sources:
