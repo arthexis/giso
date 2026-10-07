@@ -945,6 +945,8 @@ def resource_harness(monkeypatch, resources=None, *, legacy=False):
             return response("", status=202)
         if method == "tools/list":
             return response(rpc_result(payload["id"], {"tools": [tool()]}))
+        if method == "resources/templates/list":
+            return response(rpc_result(payload["id"], {"resourceTemplates": []}))
         if method == "resources/list":
             return response(rpc_result(payload["id"], {"resources": resources}))
         if method == "resources/read":
@@ -1000,6 +1002,8 @@ def test_mcp_resource_read_uses_modern_routing_headers(monkeypatch):
             return response(result)
         if payload["method"] == "tools/list":
             return response(rpc_result(payload["id"], {"tools": [tool()]}))
+        if payload["method"] == "resources/templates/list":
+            return response(rpc_result(payload["id"], {"resourceTemplates": []}))
         if payload["method"] == "resources/list":
             assert headers["Mcp-Method"] == "resources/list"
             return response(rpc_result(payload["id"], {"resources": resources}))
@@ -1049,6 +1053,8 @@ def test_mcp_resource_read_uses_legacy_session(monkeypatch):
             return response("", status=202)
         if method == "tools/list":
             return response(rpc_result(payload["id"], {"tools": [tool()]}))
+        if method == "resources/templates/list":
+            return response(rpc_result(payload["id"], {"resourceTemplates": []}))
         if method == "resources/list":
             assert headers["MCP-Session-Id"] == "resource-session"
             return response(rpc_result(payload["id"], {"resources": resources}))
@@ -1077,6 +1083,8 @@ def test_mcp_resources_list_is_paginated(monkeypatch):
             return response(result)
         if payload["method"] == "tools/list":
             return response(rpc_result(payload["id"], {"tools": [tool()]}))
+        if payload["method"] == "resources/templates/list":
+            return response(rpc_result(payload["id"], {"resourceTemplates": []}))
         if payload["method"] == "resources/list":
             cursor = payload["params"].get("cursor")
             if cursor is None:
@@ -1113,6 +1121,8 @@ def test_mcp_resource_read_decodes_blob_and_multiple_contents(monkeypatch):
             return response(result)
         if payload["method"] == "tools/list":
             return response(rpc_result(payload["id"], {"tools": [tool()]}))
+        if payload["method"] == "resources/templates/list":
+            return response(rpc_result(payload["id"], {"resourceTemplates": []}))
         if payload["method"] == "resources/list":
             return response(rpc_result(payload["id"], {"resources": [resource()]}))
         if payload["method"] == "resources/read":
@@ -1148,6 +1158,8 @@ def test_mcp_resource_only_server_is_accepted(monkeypatch):
             return response(result)
         if payload["method"] == "tools/list":
             return response(rpc_result(payload["id"], {"tools": []}))
+        if payload["method"] == "resources/templates/list":
+            return response(rpc_result(payload["id"], {"resourceTemplates": []}))
         if payload["method"] == "resources/list":
             return response(rpc_result(payload["id"], {"resources": [resource()]}))
         raise AssertionError(payload)
@@ -1172,6 +1184,8 @@ def test_mcp_resource_path_collisions_are_rejected_atomically(monkeypatch):
             return response(result)
         if payload["method"] == "tools/list":
             return response(rpc_result(payload["id"], {"tools": [tool()]}))
+        if payload["method"] == "resources/templates/list":
+            return response(rpc_result(payload["id"], {"resourceTemplates": []}))
         if payload["method"] == "resources/list":
             return response(rpc_result(payload["id"], {"resources": resources}))
         raise AssertionError(payload)
