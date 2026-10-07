@@ -402,7 +402,7 @@ class Giso(AnsibleGiso):
         if not value:
             return ""
         if value[0].isdigit():
-            value = f"_{value}"
+            value = f"tool_{value}"
         if not value.isidentifier():
             return ""
         return value
