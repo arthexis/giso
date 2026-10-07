@@ -351,7 +351,24 @@ Each callable carries an `McpResourceTemplateSpec` in `.mcp_resource_template`, 
 
 Giso expands RFC 6570 operators, scalar/list/map values, explode modifiers, and prefix modifiers using stdlib URI quoting, then reuses the ordinary `resources/read` path for the resulting concrete URI. Unknown template variables fail before any request is sent.
 
-Resource template path normalization and collision handling are atomic, template-only MCP servers are accepted, and discovered URI templates are included in MCP provenance. Completion suggestions for template arguments remain a separate slice.
+Resource template path normalization and collision handling are atomic, template-only MCP servers are accepted, and discovered URI templates are included in MCP provenance. Completion suggestions are supported when the server advertises the `completions` capability. Prompt and resource-template callables gain a `.complete(...)` helper:
+
+```python
+suggestions = g.prompts.code_review.complete(
+    "language",
+    "p",
+)
+
+template_suggestions = g.resource_templates.user.profile.complete(
+    "detail",
+    "f",
+    context={"user_id": "alice"},
+)
+```
+
+`completion/complete` uses an MCP prompt reference for prompts and the original RFC 6570 URI template as a resource-template reference. The argument payload carries the argument name and partial value, while already-filled string arguments can be supplied through `context` to narrow server-side suggestions.
+
+The result is `McpCompletion`, preserving `values`, optional `total`, and optional `has_more`. Completion helpers are only attached when the server advertises support, and modern/legacy routing follows the same negotiated request path as the rest of the MCP resolver.
 
 Subscriptions/listen, list-change notifications, and `input_required` continuation for resource reads are not part of this slice.
 
