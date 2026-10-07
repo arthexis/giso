@@ -4,7 +4,7 @@ import inspect
 
 import pytest
 
-from giso import AnsibleInspectionError, Giso
+from giso import AnsibleExecutionError, AnsibleInspectionError, Giso
 import giso.ansible as ansible_module
 
 
@@ -215,3 +215,109 @@ def test_ansible_prepare_works_under_named_branch(monkeypatch):
     assert request.fqcn == "community.general.nmcli"
     assert request.args == {"conn_name": "eth0"}
     assert not giso.results.history
+
+
+def patch_local_execution(monkeypatch, tmp_path, *, result, returncode=0, stdout="", stderr=""):
+    monkeypatch.setattr(ansible_module.shutil, "which", lambda executable: f"/usr/bin/{executable}")
+
+    class Completed:
+        def __init__(self):
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    def run(command, **kwargs):
+        tree = command[command.index("--tree") + 1]
+        result_path = ansible_module.os.path.join(tree, "localhost")
+        with open(result_path, "w", encoding="utf-8") as handle:
+            ansible_module.json.dump(result, handle)
+        return Completed()
+
+    monkeypatch.setattr(ansible_module.subprocess, "run", run)
+
+
+def test_ansible_execute_runs_prepared_request_on_localhost(monkeypatch, tmp_path):
+    patch_ansible_doc(monkeypatch)
+    patch_local_execution(
+        monkeypatch,
+        tmp_path,
+        result={"changed": False, "msg": "ok"},
+    )
+    giso = Giso().ansible("community.general")
+    request = giso.community.general.modules.nmcli.prepare(name="eth0")
+
+    result = giso.execute(request)
+
+    assert result == {"changed": False, "msg": "ok"}
+    assert giso.results.last == result
+    assert giso.results.history[-1][0] == "ansible.localhost.community.general.nmcli"
+
+
+def test_ansible_execute_requires_prepared_request():
+    with pytest.raises(TypeError, match="AnsibleModuleRequest"):
+        Giso().execute({"fqcn": "community.general.nmcli"})
+
+
+def test_ansible_execute_requires_ansible_binary(monkeypatch):
+    monkeypatch.setattr(ansible_module.shutil, "which", lambda executable: None)
+    request = ansible_module.AnsibleModuleRequest(
+        fqcn="community.general.nmcli",
+        args={"conn_name": "eth0"},
+    )
+
+    with pytest.raises(AnsibleExecutionError, match="requires ansible"):
+        Giso().execute(request)
+
+
+def test_ansible_execute_surfaces_module_failure(monkeypatch, tmp_path):
+    patch_local_execution(
+        monkeypatch,
+        tmp_path,
+        result={"failed": True, "msg": "device missing"},
+        returncode=2,
+    )
+    request = ansible_module.AnsibleModuleRequest(
+        fqcn="community.general.nmcli",
+        args={"conn_name": "eth0"},
+    )
+
+    with pytest.raises(AnsibleExecutionError, match="device missing") as captured:
+        Giso().execute(request)
+
+    assert captured.value.result == {"failed": True, "msg": "device missing"}
+    assert not Giso().results.history
+
+
+def test_ansible_execute_rejects_missing_result_file(monkeypatch):
+    monkeypatch.setattr(ansible_module.shutil, "which", lambda executable: "/usr/bin/ansible")
+
+    class Completed:
+        returncode = 1
+        stdout = "broken output"
+        stderr = ""
+
+    monkeypatch.setattr(ansible_module.subprocess, "run", lambda *args, **kwargs: Completed())
+    request = ansible_module.AnsibleModuleRequest(
+        fqcn="community.general.nmcli",
+        args={"conn_name": "eth0"},
+    )
+
+    with pytest.raises(AnsibleExecutionError, match="no valid result"):
+        Giso().execute(request)
+
+
+def test_ansible_module_args_are_serialized_deterministically():
+    rendered = Giso._serialize_module_args(
+        {
+            "name": "wired connection",
+            "enabled": True,
+            "count": 2,
+            "items": ["a", "b"],
+            "settings": {"mode": "auto"},
+        }
+    )
+
+    assert rendered == (
+        "name='wired connection' enabled=true count=2 "
+        "items='[\"a\",\"b\"]' settings='{"mode":"auto"}'"
+    )
