@@ -896,3 +896,291 @@ def test_mcp_task_failure_is_reported(monkeypatch):
         giso.execute(task)
 
     assert captured.value.result["status"] == "failed"
+
+
+def resource(
+    uri="file:///project/main.txt",
+    *,
+    name="project.main",
+    mime_type="text/plain",
+):
+    return {
+        "uri": uri,
+        "name": name,
+        "title": "Project main",
+        "description": "Primary project resource",
+        "mimeType": mime_type,
+        "annotations": {"audience": ["assistant"]},
+    }
+
+
+def resource_harness(monkeypatch, resources=None, *, legacy=False):
+    resources = [resource()] if resources is None else resources
+
+    def handler(payload, headers, allow_empty):
+        method = payload["method"]
+        if method == "server/discover":
+            if legacy:
+                return response({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "error": {"code": -32601, "message": "Method not found"},
+                })
+            result = modern_discover()
+            result["result"]["capabilities"]["resources"] = {}
+            return response(result)
+        if method == "initialize":
+            return response(
+                rpc_result(2, {
+                    "protocolVersion": "2025-11-25",
+                    "serverInfo": {"name": "legacy-mcp"},
+                    "capabilities": {"tools": {}, "resources": {}},
+                }),
+                headers={
+                    "Content-Type": "application/json",
+                    "MCP-Session-Id": "resource-session",
+                },
+            )
+        if method == "notifications/initialized":
+            return response("", status=202)
+        if method == "tools/list":
+            return response(rpc_result(payload["id"], {"tools": [tool()]}))
+        if method == "resources/list":
+            return response(rpc_result(payload["id"], {"resources": resources}))
+        if method == "resources/read":
+            assert payload["params"]["uri"] == resources[0]["uri"]
+            return response(rpc_result(payload["id"], {
+                "contents": [{
+                    "uri": resources[0]["uri"],
+                    "mimeType": resources[0].get("mimeType"),
+                    "text": "hello",
+                    "annotations": {"priority": 1},
+                }]
+            }))
+        raise AssertionError(payload)
+
+    return McpHttpHarness(monkeypatch, handler)
+
+
+def test_mcp_resources_are_discovered_and_folded(monkeypatch):
+    resource_harness(monkeypatch)
+
+    giso = Giso().mcp(ENDPOINT)
+
+    reader = giso.resources.project.main.read
+    assert reader.mcp_resource.uri == "file:///project/main.txt"
+    assert reader.mcp_resource.name == "project.main"
+    assert reader.mcp_resource.mime_type == "text/plain"
+    assert reader.__doc__ == "Primary project resource"
+    assert giso.provenance[0]["resources"] == "file:///project/main.txt"
+
+
+def test_mcp_resource_read_returns_content_metadata(monkeypatch):
+    resource_harness(monkeypatch)
+    giso = Giso().mcp(ENDPOINT)
+
+    content = giso.resources.project.main.read()
+
+    assert isinstance(content, mcp_module.McpResourceContent)
+    assert content.uri == "file:///project/main.txt"
+    assert content.mime_type == "text/plain"
+    assert content.value == "hello"
+    assert content.annotations == {"priority": 1}
+
+
+def test_mcp_resource_read_uses_modern_routing_headers(monkeypatch):
+    calls = []
+    resources = [resource()]
+
+    def handler(payload, headers, allow_empty):
+        calls.append((payload, dict(headers)))
+        if payload["method"] == "server/discover":
+            result = modern_discover()
+            result["result"]["capabilities"]["resources"] = {}
+            return response(result)
+        if payload["method"] == "tools/list":
+            return response(rpc_result(payload["id"], {"tools": [tool()]}))
+        if payload["method"] == "resources/list":
+            assert headers["Mcp-Method"] == "resources/list"
+            return response(rpc_result(payload["id"], {"resources": resources}))
+        if payload["method"] == "resources/read":
+            assert headers["Mcp-Method"] == "resources/read"
+            assert headers["Mcp-Name"] == "file:///project/main.txt"
+            return response(rpc_result(payload["id"], {
+                "contents": [{
+                    "uri": "file:///project/main.txt",
+                    "text": "hello",
+                }]
+            }))
+        raise AssertionError(payload)
+
+    McpHttpHarness(monkeypatch, handler)
+    giso = Giso().mcp(ENDPOINT)
+
+    assert giso.resources.project.main.read().value == "hello"
+
+
+def test_mcp_resource_read_uses_legacy_session(monkeypatch):
+    calls = []
+    resources = [resource()]
+
+    def handler(payload, headers, allow_empty):
+        calls.append((payload, dict(headers)))
+        method = payload["method"]
+        if method == "server/discover":
+            return response({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "error": {"code": -32601, "message": "Method not found"},
+            })
+        if method == "initialize":
+            return response(
+                rpc_result(2, {
+                    "protocolVersion": "2025-11-25",
+                    "serverInfo": {"name": "legacy-mcp"},
+                    "capabilities": {"tools": {}, "resources": {}},
+                }),
+                headers={
+                    "Content-Type": "application/json",
+                    "MCP-Session-Id": "resource-session",
+                },
+            )
+        if method == "notifications/initialized":
+            return response("", status=202)
+        if method == "tools/list":
+            return response(rpc_result(payload["id"], {"tools": [tool()]}))
+        if method == "resources/list":
+            assert headers["MCP-Session-Id"] == "resource-session"
+            return response(rpc_result(payload["id"], {"resources": resources}))
+        if method == "resources/read":
+            assert headers["MCP-Session-Id"] == "resource-session"
+            assert "Mcp-Method" not in headers
+            return response(rpc_result(payload["id"], {
+                "contents": [{
+                    "uri": "file:///project/main.txt",
+                    "text": "legacy",
+                }]
+            }))
+        raise AssertionError(payload)
+
+    McpHttpHarness(monkeypatch, handler)
+    giso = Giso().mcp(ENDPOINT)
+
+    assert giso.resources.project.main.read().value == "legacy"
+
+
+def test_mcp_resources_list_is_paginated(monkeypatch):
+    def handler(payload, headers, allow_empty):
+        if payload["method"] == "server/discover":
+            result = modern_discover()
+            result["result"]["capabilities"]["resources"] = {}
+            return response(result)
+        if payload["method"] == "tools/list":
+            return response(rpc_result(payload["id"], {"tools": [tool()]}))
+        if payload["method"] == "resources/list":
+            cursor = payload["params"].get("cursor")
+            if cursor is None:
+                return response(rpc_result(payload["id"], {
+                    "resources": [resource(name="project.main")],
+                    "nextCursor": "page-2",
+                }))
+            assert cursor == "page-2"
+            return response(rpc_result(payload["id"], {
+                "resources": [
+                    resource(
+                        uri="file:///project/README.md",
+                        name="project.readme",
+                        mime_type="text/markdown",
+                    )
+                ]
+            }))
+        raise AssertionError(payload)
+
+    McpHttpHarness(monkeypatch, handler)
+    giso = Giso().mcp(ENDPOINT)
+
+    assert giso.resources.project.main.read.mcp_resource.name == "project.main"
+    assert giso.resources.project.readme.read.mcp_resource.name == "project.readme"
+
+
+def test_mcp_resource_read_decodes_blob_and_multiple_contents(monkeypatch):
+    encoded = mcp_module.base64.b64encode(b"binary").decode("ascii")
+
+    def handler(payload, headers, allow_empty):
+        if payload["method"] == "server/discover":
+            result = modern_discover()
+            result["result"]["capabilities"]["resources"] = {}
+            return response(result)
+        if payload["method"] == "tools/list":
+            return response(rpc_result(payload["id"], {"tools": [tool()]}))
+        if payload["method"] == "resources/list":
+            return response(rpc_result(payload["id"], {"resources": [resource()]}))
+        if payload["method"] == "resources/read":
+            return response(rpc_result(payload["id"], {
+                "contents": [
+                    {
+                        "uri": "file:///project/main.txt",
+                        "text": "hello",
+                        "mimeType": "text/plain",
+                    },
+                    {
+                        "uri": "file:///project/blob.bin",
+                        "blob": encoded,
+                        "mimeType": "application/octet-stream",
+                    },
+                ]
+            }))
+        raise AssertionError(payload)
+
+    McpHttpHarness(monkeypatch, handler)
+    giso = Giso().mcp(ENDPOINT)
+
+    contents = giso.resources.project.main.read()
+
+    assert [item.value for item in contents] == ["hello", b"binary"]
+
+
+def test_mcp_resource_only_server_is_accepted(monkeypatch):
+    def handler(payload, headers, allow_empty):
+        if payload["method"] == "server/discover":
+            result = modern_discover()
+            result["result"]["capabilities"] = {"resources": {}}
+            return response(result)
+        if payload["method"] == "tools/list":
+            return response(rpc_result(payload["id"], {"tools": []}))
+        if payload["method"] == "resources/list":
+            return response(rpc_result(payload["id"], {"resources": [resource()]}))
+        raise AssertionError(payload)
+
+    McpHttpHarness(monkeypatch, handler)
+
+    giso = Giso().mcp(ENDPOINT)
+
+    assert giso.resources.project.main.read.mcp_resource.uri == "file:///project/main.txt"
+
+
+def test_mcp_resource_path_collisions_are_rejected_atomically(monkeypatch):
+    resources = [
+        resource(uri="file:///a", name="project-main"),
+        resource(uri="file:///b", name="project_main"),
+    ]
+
+    def handler(payload, headers, allow_empty):
+        if payload["method"] == "server/discover":
+            result = modern_discover()
+            result["result"]["capabilities"]["resources"] = {}
+            return response(result)
+        if payload["method"] == "tools/list":
+            return response(rpc_result(payload["id"], {"tools": [tool()]}))
+        if payload["method"] == "resources/list":
+            return response(rpc_result(payload["id"], {"resources": resources}))
+        raise AssertionError(payload)
+
+    McpHttpHarness(monkeypatch, handler)
+    giso = Giso()
+
+    with pytest.raises(McpInspectionError, match="same Giso path"):
+        giso.mcp(ENDPOINT)
+
+    assert not giso.operations
+    assert not giso.provenance
