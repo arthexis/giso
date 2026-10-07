@@ -354,3 +354,181 @@ def test_mcp_named_constructor_branch(monkeypatch):
 
     assert giso.remote.charger.status.mcp_tool.name == "charger.status"
     assert giso.provenance[0]["source"] == f"mcp:{ENDPOINT}"
+
+
+def test_mcp_prepare_returns_validated_request(monkeypatch):
+    modern_harness(monkeypatch)
+    giso = Giso().mcp(
+        ENDPOINT,
+        headers={"Authorization": "Bearer secret"},
+    )
+
+    request = giso.charger.status.prepare(
+        charger_id="cp-1",
+        verbose=True,
+    )
+
+    assert request.name == "charger.status"
+    assert request.arguments == {
+        "charger_id": "cp-1",
+        "verbose": True,
+    }
+    assert request.endpoint == ENDPOINT
+    assert request.protocol_version == mcp_module.MODERN_PROTOCOL_VERSION
+    assert request.era == "modern"
+    assert request.session_id is None
+    assert request.headers == {"Authorization": "Bearer secret"}
+    assert not giso.results.history
+
+
+def test_mcp_prepare_does_not_inject_json_schema_defaults(monkeypatch):
+    modern_harness(monkeypatch)
+
+    request = Giso().mcp(ENDPOINT).charger.status.prepare(charger_id="cp-1")
+
+    assert request.arguments == {"charger_id": "cp-1"}
+
+
+def test_mcp_prepare_preserves_legacy_session_context(monkeypatch):
+    def handler(payload, headers, allow_empty):
+        method = payload["method"]
+        if method == "server/discover":
+            return response(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "error": {"code": -32601, "message": "Method not found"},
+                }
+            )
+        if method == "initialize":
+            return response(
+                rpc_result(
+                    2,
+                    {
+                        "protocolVersion": "2025-11-25",
+                        "serverInfo": {"name": "legacy-mcp"},
+                        "capabilities": {"tools": {}},
+                    },
+                ),
+                headers={
+                    "Content-Type": "application/json",
+                    "MCP-Session-Id": "session-123",
+                },
+            )
+        if method == "notifications/initialized":
+            return response("", status=202)
+        if method == "tools/list":
+            return response(rpc_result(payload["id"], {"tools": [tool()]}))
+        raise AssertionError(payload)
+
+    McpHttpHarness(monkeypatch, handler)
+
+    request = Giso().mcp(ENDPOINT).charger.status.prepare(charger_id="cp-1")
+
+    assert request.era == "legacy"
+    assert request.protocol_version == "2025-11-25"
+    assert request.session_id == "session-123"
+
+
+def test_mcp_prepare_rejects_missing_required_argument(monkeypatch):
+    modern_harness(monkeypatch)
+
+    with pytest.raises(McpInspectionError, match="missing required"):
+        Giso().mcp(ENDPOINT).charger.status.prepare()
+
+
+def test_mcp_prepare_respects_additional_properties_false(monkeypatch):
+    schema = {
+        "type": "object",
+        "properties": {
+            "charger_id": {"type": "string"},
+        },
+        "required": ["charger_id"],
+        "additionalProperties": False,
+    }
+    modern_harness(
+        monkeypatch,
+        tools=[tool(input_schema=schema)],
+    )
+
+    operation = Giso().mcp(ENDPOINT).charger.status
+
+    with pytest.raises(McpInspectionError, match="no allowed field"):
+        operation.prepare(charger_id="cp-1", unknown=True)
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        (3, "expects string"),
+        (True, "expects string"),
+    ],
+)
+def test_mcp_prepare_validates_primitive_types(monkeypatch, value, message):
+    modern_harness(monkeypatch)
+
+    with pytest.raises(McpInspectionError, match=message):
+        Giso().mcp(ENDPOINT).charger.status.prepare(charger_id=value)
+
+
+def test_mcp_prepare_validates_enum(monkeypatch):
+    schema = {
+        "type": "object",
+        "properties": {
+            "state": {
+                "type": "string",
+                "enum": ["ready", "faulted"],
+            }
+        },
+        "required": ["state"],
+    }
+    modern_harness(monkeypatch, tools=[tool(input_schema=schema)])
+
+    with pytest.raises(McpInspectionError, match="must be one of"):
+        Giso().mcp(ENDPOINT).charger.status.prepare(state="unknown")
+
+
+def test_mcp_prepare_validates_nested_objects_and_arrays(monkeypatch):
+    schema = {
+        "type": "object",
+        "properties": {
+            "targets": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "enabled": {"type": "boolean"},
+                    },
+                    "required": ["id", "enabled"],
+                    "additionalProperties": False,
+                },
+            }
+        },
+        "required": ["targets"],
+    }
+    modern_harness(monkeypatch, tools=[tool(input_schema=schema)])
+    operation = Giso().mcp(ENDPOINT).charger.status
+
+    request = operation.prepare(
+        targets=[{"id": "cp-1", "enabled": True}],
+    )
+    assert request.arguments == {
+        "targets": [{"id": "cp-1", "enabled": True}],
+    }
+
+    with pytest.raises(McpInspectionError, match="expects boolean"):
+        operation.prepare(
+            targets=[{"id": "cp-1", "enabled": "yes"}],
+        )
+
+
+def test_mcp_prepare_works_under_named_constructor_branch(monkeypatch):
+    modern_harness(monkeypatch)
+    giso = Giso(remote=f"mcp:{ENDPOINT}")
+
+    request = giso.remote.charger.status.prepare(charger_id="cp-1")
+
+    assert request.name == "charger.status"
+    assert request.arguments == {"charger_id": "cp-1"}
+    assert not giso.results.history
