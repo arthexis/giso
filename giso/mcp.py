@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import inspect
 import json
 import re
@@ -26,6 +27,29 @@ class McpExecutionError(RuntimeError):
     def __init__(self, message: str, *, result: Mapping[str, Any] | None = None):
         super().__init__(message)
         self.result = result
+
+
+@dataclass(frozen=True)
+class McpResourceSpec:
+    """Read-only metadata for one MCP resource."""
+
+    uri: str
+    name: str
+    path: str
+    title: str
+    description: str
+    mime_type: str | None
+    annotations: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class McpResourceContent:
+    """One decoded MCP resource content item."""
+
+    uri: str
+    mime_type: str | None
+    value: Any
+    annotations: Mapping[str, Any]
 
 
 @dataclass(frozen=True)
@@ -158,8 +182,11 @@ class Giso(AnsibleGiso):
         private_headers = self._validate_mcp_headers(headers)
         session = self._open_mcp_session(endpoint, private_headers)
         tools = self._list_mcp_tools(endpoint, private_headers, session)
-        if not tools:
-            raise McpInspectionError(f"MCP server {endpoint!r} exposes no tools")
+        resources = self._list_mcp_resources(endpoint, private_headers, session)
+        if not tools and not resources:
+            raise McpInspectionError(
+                f"MCP server {endpoint!r} exposes no tools or resources"
+            )
 
         child = type(self)(name=self.__name__)
         seen_paths: dict[str, str] = {}
@@ -182,6 +209,26 @@ class Giso(AnsibleGiso):
                 ),
             )
 
+        seen_resource_paths: dict[str, str] = {}
+        for payload in resources:
+            spec = self._mcp_resource_spec(payload)
+            previous = seen_resource_paths.get(spec.path)
+            if previous is not None and previous != spec.uri:
+                raise McpInspectionError(
+                    f"MCP resources {previous!r} and {spec.uri!r} map to the same "
+                    f"Giso path {spec.path!r}"
+                )
+            seen_resource_paths[spec.path] = spec.uri
+            child._attach_operation(
+                f"resources.{spec.path}.read",
+                self._mcp_resource_reader(
+                    spec,
+                    endpoint=endpoint,
+                    headers=private_headers,
+                    session=session,
+                ),
+            )
+
         server_spec = McpServerSpec(
             endpoint=endpoint,
             protocol_version=session.protocol_version,
@@ -197,6 +244,9 @@ class Giso(AnsibleGiso):
             "protocol_version": session.protocol_version,
             "era": session.era,
             "tools": ",".join(spec_name for spec_name in sorted(seen_paths.values())),
+            "resources": ",".join(
+                resource_uri for resource_uri in sorted(seen_resource_paths.values())
+            ),
         }
         if provenance not in child.provenance:
             child.provenance.append(provenance)
@@ -625,6 +675,208 @@ class Giso(AnsibleGiso):
             request_id += 1
 
         return tuple(tools)
+
+    @classmethod
+    def _list_mcp_resources(
+        cls,
+        endpoint: str,
+        headers: Mapping[str, str],
+        session: _McpSession,
+    ) -> tuple[Mapping[str, Any], ...]:
+        if "resources" not in session.capabilities:
+            return ()
+
+        resources: list[Mapping[str, Any]] = []
+        cursor: str | None = None
+        request_id = 40
+        while True:
+            params: dict[str, Any] = {}
+            if cursor is not None:
+                params["cursor"] = cursor
+            payload, request_headers = cls._mcp_request(
+                session,
+                headers,
+                "resources/list",
+                request_id=request_id,
+                params=params,
+            )
+            response = cls._post_mcp(endpoint, payload, headers=request_headers)
+            message = cls._decode_mcp_response(response)
+            cls._raise_rpc_error("resources/list", message)
+            result = message.get("result")
+            if not isinstance(result, dict):
+                raise McpInspectionError("MCP resources/list returned no result")
+            page = result.get("resources")
+            if not isinstance(page, list):
+                raise McpInspectionError("MCP resources/list returned invalid resources")
+            for resource in page:
+                if not isinstance(resource, dict):
+                    raise McpInspectionError("MCP resources/list returned an invalid resource")
+                resources.append(resource)
+            next_cursor = result.get("nextCursor")
+            if next_cursor is None:
+                break
+            if not isinstance(next_cursor, str) or not next_cursor:
+                raise McpInspectionError("MCP resources/list returned an invalid nextCursor")
+            cursor = next_cursor
+            request_id += 1
+        return tuple(resources)
+
+    @classmethod
+    def _mcp_resource_spec(cls, payload: Mapping[str, Any]) -> McpResourceSpec:
+        uri = payload.get("uri")
+        name = payload.get("name")
+        if not isinstance(uri, str) or not uri:
+            raise McpInspectionError("MCP resource has no valid uri")
+        if not isinstance(name, str) or not name.strip():
+            raise McpInspectionError(f"MCP resource {uri!r} has no valid name")
+        name = name.strip()
+        title = payload.get("title")
+        description = payload.get("description")
+        mime_type = payload.get("mimeType")
+        annotations = payload.get("annotations")
+        return McpResourceSpec(
+            uri=uri,
+            name=name,
+            path=cls._mcp_tool_path(name),
+            title=title if isinstance(title, str) else "",
+            description=description if isinstance(description, str) else "",
+            mime_type=mime_type if isinstance(mime_type, str) else None,
+            annotations=dict(annotations) if isinstance(annotations, dict) else {},
+        )
+
+    @classmethod
+    def _mcp_resource_reader(
+        cls,
+        spec: McpResourceSpec,
+        *,
+        endpoint: str,
+        headers: Mapping[str, str],
+        session: _McpSession,
+    ):
+        def read() -> Any:
+            return cls._read_mcp_resource(
+                spec,
+                endpoint=endpoint,
+                headers=headers,
+                session=session,
+            )
+
+        read.__name__ = "read"
+        read.__doc__ = spec.description or spec.title or f"Read MCP resource {spec.name}"
+        read.mcp_resource = spec  # type: ignore[attr-defined]
+        return read
+
+    @classmethod
+    def _read_mcp_resource(
+        cls,
+        spec: McpResourceSpec,
+        *,
+        endpoint: str,
+        headers: Mapping[str, str],
+        session: _McpSession,
+    ) -> Any:
+        payload, request_headers = cls._mcp_request(
+            session,
+            headers,
+            "resources/read",
+            request_id=50,
+            params={"uri": spec.uri},
+            name=spec.uri,
+        )
+        response = cls._post_mcp(endpoint, payload, headers=request_headers)
+        message = cls._decode_mcp_response(response)
+        error = message.get("error")
+        if isinstance(error, dict):
+            raise McpExecutionError(
+                cls._rpc_error_message("resources/read", error),
+                result=error,
+            )
+        result = message.get("result")
+        if not isinstance(result, dict):
+            raise McpExecutionError("MCP resources/read returned no result")
+        if result.get("resultType") == "input_required":
+            raise McpExecutionError(
+                "MCP resources/read input_required continuation is not implemented",
+                result=result,
+            )
+        contents = result.get("contents")
+        if not isinstance(contents, list):
+            raise McpExecutionError("MCP resources/read returned invalid contents", result=result)
+        decoded = [cls._mcp_resource_content(item) for item in contents]
+        if len(decoded) == 1:
+            return decoded[0]
+        return decoded
+
+    @staticmethod
+    def _mcp_resource_content(item: Any) -> McpResourceContent:
+        if not isinstance(item, dict):
+            raise McpExecutionError("MCP resource content must be an object")
+        uri = item.get("uri")
+        if not isinstance(uri, str) or not uri:
+            raise McpExecutionError("MCP resource content has no valid uri")
+        mime_type = item.get("mimeType")
+        annotations = item.get("annotations")
+        if "text" in item:
+            value = item["text"]
+            if not isinstance(value, str):
+                raise McpExecutionError("MCP text resource content must be a string")
+        elif "blob" in item:
+            blob = item["blob"]
+            if not isinstance(blob, str):
+                raise McpExecutionError("MCP blob resource content must be base64 text")
+            try:
+                value = base64.b64decode(blob, validate=True)
+            except ValueError as exc:
+                raise McpExecutionError("MCP blob resource content is invalid base64") from exc
+        else:
+            raise McpExecutionError("MCP resource content has neither text nor blob")
+        return McpResourceContent(
+            uri=uri,
+            mime_type=mime_type if isinstance(mime_type, str) else None,
+            value=value,
+            annotations=dict(annotations) if isinstance(annotations, dict) else {},
+        )
+
+    @classmethod
+    def _mcp_request(
+        cls,
+        session: _McpSession,
+        headers: Mapping[str, str],
+        method: str,
+        *,
+        request_id: int,
+        params: Mapping[str, Any],
+        name: str | None = None,
+    ) -> tuple[Mapping[str, Any], Mapping[str, str]]:
+        if session.era == "modern":
+            payload = cls._modern_request_payload(
+                method,
+                request_id=request_id,
+                params=params,
+            )
+            request_headers = {
+                **headers,
+                "MCP-Protocol-Version": session.protocol_version,
+                "Mcp-Method": method,
+            }
+            if name is not None:
+                request_headers["Mcp-Name"] = name
+            return payload, request_headers
+
+        payload = {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": method,
+            "params": dict(params),
+        }
+        request_headers = {
+            **headers,
+            "MCP-Protocol-Version": session.protocol_version,
+        }
+        if session.session_id:
+            request_headers["MCP-Session-Id"] = session.session_id
+        return payload, request_headers
 
     @classmethod
     def _mcp_tool_spec(cls, payload: Mapping[str, Any]) -> McpToolSpec:
