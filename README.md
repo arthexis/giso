@@ -286,7 +286,20 @@ assert request.arguments == {
 
 The resulting `McpToolRequest` retains the endpoint, negotiated protocol era/version, legacy session ID when present, and private request headers so a later execution slice can send `tools/call` without renegotiating the request context.
 
-Directly calling an MCP-backed operation still raises `McpInspectionError`; `tools/call`, resources, prompts, subscriptions, and stdio transport are not implemented yet.
+Prepared requests can be executed explicitly:
+
+```python
+request = g.charger.status.prepare(charger_id="cp-1")
+result = g.execute(request)
+```
+
+For modern `2026-07-28` servers, Giso sends the required `MCP-Protocol-Version`, `Mcp-Method`, and `Mcp-Name` headers. Legacy requests preserve the negotiated protocol version and session ID.
+
+Successful `tools/call` results prefer MCP `structuredContent`. Otherwise text content is returned as a string, or JSON-decoded when the text is valid JSON; multiple content blocks are returned as a list, while non-text blocks remain mappings.
+
+JSON-RPC failures and MCP tool results with `isError: true` raise `McpExecutionError` and preserve the structured error/result payload on the exception. Modern `task` and `input_required` result types are reported as unsupported continuations for now instead of being misinterpreted as completed calls.
+
+Directly calling an MCP-backed operation still raises `McpInspectionError`; execution remains explicit through `prepare()` followed by `execute()`. Resources, prompts, subscriptions, task continuation, input-required continuation, and stdio transport are not implemented yet.
 
 The negotiated endpoint metadata is available as `g.mcp_server`. MCP provenance records the endpoint, protocol era/version, and discovered tool names. Optional HTTP headers can be supplied to `mcp(..., headers={...})` for authentication; header values remain private and are never copied into provenance. Remote endpoints require HTTPS, while loopback HTTP is allowed for local development.
 
