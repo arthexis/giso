@@ -319,5 +319,5 @@ def test_ansible_module_args_are_serialized_deterministically():
 
     assert rendered == (
         "name='wired connection' enabled=true count=2 "
-        "items='[\"a\",\"b\"]' settings='{"mode":"auto"}'"
+        "items='[\\\"a\\\",\\\"b\\\"]' settings='{\\\"mode\\\":\\\"auto\\\"}'"
     )
