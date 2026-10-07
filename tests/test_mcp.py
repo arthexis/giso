@@ -1349,10 +1349,11 @@ def test_mcp_prompt_get_uses_modern_routing_headers(monkeypatch):
         if payload["method"] == "prompts/get":
             assert headers["Mcp-Method"] == "prompts/get"
             assert headers["Mcp-Name"] == "code_review"
-            assert payload["params"] == {
-                "name": "code_review",
-                "arguments": {"code": "x"},
-            }
+            assert payload["params"]["name"] == "code_review"
+            assert payload["params"]["arguments"] == {"code": "x"}
+            assert payload["params"]["_meta"][
+                "io.modelcontextprotocol/protocolVersion"
+            ] == mcp_module.MODERN_PROTOCOL_VERSION
             return response(rpc_result(payload["id"], {
                 "resultType": "complete",
                 "messages": [
