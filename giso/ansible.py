@@ -38,11 +38,21 @@ class AnsibleModuleSpec:
 
 
 @dataclass(frozen=True)
+class AnsibleExecutionContext:
+    """Bound inventory/host context for Ansible module execution."""
+
+    host: str
+    inventory: str
+    connection: str | None = None
+
+
+@dataclass(frozen=True)
 class AnsibleModuleRequest:
     """A validated, non-executing Ansible module invocation."""
 
     fqcn: str
     args: Mapping[str, Any]
+    context: AnsibleExecutionContext
 
 
 class Giso(DistributionGiso):
@@ -56,9 +66,21 @@ class Giso(DistributionGiso):
                 super().fold(source)
         return self
 
-    def ansible(self, collection: str) -> "Giso":
-        """Inspect modules from one installed Ansible collection without executing them."""
+    def ansible(
+        self,
+        collection: str,
+        *,
+        inventory: str | os.PathLike[str] | None = None,
+        host: str | None = None,
+        connection: str | None = None,
+    ) -> "Giso":
+        """Inspect one collection and bind module requests to one execution target."""
         collection = self._validate_collection_name(collection)
+        context = self._execution_context(
+            inventory=inventory,
+            host=host,
+            connection=connection,
+        )
         modules = self._list_ansible_modules(collection)
         if not modules:
             raise AnsibleInspectionError(
@@ -71,7 +93,7 @@ class Giso(DistributionGiso):
             spec = self._module_spec(collection, fqcn, docs.get(fqcn))
             child._attach_operation(
                 f"{collection}.modules.{spec.name}",
-                self._inspection_callable(spec),
+                self._inspection_callable(spec, context),
             )
 
         provenance = {
@@ -87,15 +109,15 @@ class Giso(DistributionGiso):
 
 
     def execute(self, request: AnsibleModuleRequest) -> Mapping[str, Any]:
-        """Execute one prepared Ansible module request against localhost."""
+        """Execute one prepared Ansible module request in its bound context."""
         if not isinstance(request, AnsibleModuleRequest):
             raise TypeError("Ansible execution requires an AnsibleModuleRequest from prepare()")
-        result = self._run_ansible_local(request)
-        operation_name = f"ansible.localhost.{request.fqcn}"
+        result = self._run_ansible(request)
+        operation_name = f"ansible.{request.context.host}.{request.fqcn}"
         return self.results.add(operation_name, result)
 
     @classmethod
-    def _run_ansible_local(cls, request: AnsibleModuleRequest) -> Mapping[str, Any]:
+    def _run_ansible(cls, request: AnsibleModuleRequest) -> Mapping[str, Any]:
         executable = shutil.which("ansible")
         if executable is None:
             raise AnsibleExecutionError(
@@ -106,18 +128,20 @@ class Giso(DistributionGiso):
         with tempfile.TemporaryDirectory(prefix="giso-ansible-") as tree:
             command = [
                 executable,
-                "localhost",
+                request.context.host,
                 "--inventory",
-                "localhost,",
-                "--connection",
-                "local",
+                request.context.inventory,
+            ]
+            if request.context.connection is not None:
+                command.extend(["--connection", request.context.connection])
+            command.extend([
                 "--module-name",
                 request.fqcn,
                 "--args",
                 module_args,
                 "--tree",
                 tree,
-            ]
+            ])
             try:
                 completed = subprocess.run(
                     command,
@@ -132,9 +156,18 @@ class Giso(DistributionGiso):
                     f"Cannot execute Ansible module {request.fqcn}"
                 ) from exc
 
-            result_path = os.path.join(tree, "localhost")
+            result_files = [
+                os.path.join(tree, name)
+                for name in sorted(os.listdir(tree))
+                if os.path.isfile(os.path.join(tree, name))
+            ]
+            if len(result_files) != 1:
+                raise AnsibleExecutionError(
+                    f"Ansible target {request.context.host!r} produced "
+                    f"{len(result_files)} host results; exactly one is required"
+                )
             try:
-                with open(result_path, encoding="utf-8") as handle:
+                with open(result_files[0], encoding="utf-8") as handle:
                     result = json.load(handle)
             except (OSError, json.JSONDecodeError) as exc:
                 detail = completed.stderr.strip() or completed.stdout.strip()
@@ -154,6 +187,43 @@ class Giso(DistributionGiso):
                     message += f": {detail}"
                 raise AnsibleExecutionError(message, result=result)
             return result
+
+    @classmethod
+    def _execution_context(
+        cls,
+        *,
+        inventory: str | os.PathLike[str] | None,
+        host: str | None,
+        connection: str | None,
+    ) -> AnsibleExecutionContext:
+        if inventory is None:
+            if host not in (None, "localhost"):
+                raise ValueError("An explicit inventory is required for non-localhost targets")
+            if connection not in (None, "local"):
+                raise ValueError("The implicit localhost inventory only supports local connection")
+            return AnsibleExecutionContext(
+                host="localhost",
+                inventory="localhost,",
+                connection="local",
+            )
+
+        inventory_value = os.fspath(inventory).strip()
+        if not inventory_value:
+            raise ValueError("Ansible inventory must be a non-empty path or inventory source")
+        if host is None or not isinstance(host, str) or not host.strip():
+            raise ValueError("An explicit host is required when inventory is supplied")
+        host_value = host.strip()
+        if any(char.isspace() for char in host_value):
+            raise ValueError("Ansible host must not contain whitespace")
+        if connection is not None:
+            if not isinstance(connection, str) or not connection.strip():
+                raise ValueError("Ansible connection must be a non-empty string")
+            connection = connection.strip()
+        return AnsibleExecutionContext(
+            host=host_value,
+            inventory=inventory_value,
+            connection=connection,
+        )
 
     @staticmethod
     def _serialize_module_args(args: Mapping[str, Any]) -> str:
@@ -269,14 +339,18 @@ class Giso(DistributionGiso):
         )
 
     @classmethod
-    def _inspection_callable(cls, spec: AnsibleModuleSpec):
+    def _inspection_callable(
+        cls,
+        spec: AnsibleModuleSpec,
+        context: AnsibleExecutionContext,
+    ):
         def operation(**kwargs: Any) -> None:
             raise AnsibleInspectionError(
                 f"{spec.fqcn} is inspection-only; Ansible execution is not implemented"
             )
 
         def prepare(**kwargs: Any) -> AnsibleModuleRequest:
-            return cls._prepare_module_request(spec, kwargs)
+            return cls._prepare_module_request(spec, kwargs, context)
 
         operation.__name__ = spec.name.rsplit(".", 1)[-1]
         operation.__doc__ = spec.short_description or "\n".join(spec.description)
@@ -290,6 +364,7 @@ class Giso(DistributionGiso):
         cls,
         spec: AnsibleModuleSpec,
         supplied: Mapping[str, Any],
+        context: AnsibleExecutionContext,
     ) -> AnsibleModuleRequest:
         aliases: dict[str, str] = {}
         for option_name, option in spec.options.items():
@@ -326,7 +401,11 @@ class Giso(DistributionGiso):
                 f"{spec.fqcn} is missing required option(s): {joined}"
             )
 
-        return AnsibleModuleRequest(fqcn=spec.fqcn, args=normalized)
+        return AnsibleModuleRequest(
+            fqcn=spec.fqcn,
+            args=normalized,
+            context=context,
+        )
 
     @classmethod
     def _validate_option_value(
