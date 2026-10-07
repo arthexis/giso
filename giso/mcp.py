@@ -20,6 +20,14 @@ class McpInspectionError(RuntimeError):
     """Raised when an MCP server cannot be inspected safely."""
 
 
+class McpExecutionError(RuntimeError):
+    """Raised when a prepared MCP tool request cannot execute successfully."""
+
+    def __init__(self, message: str, *, result: Mapping[str, Any] | None = None):
+        super().__init__(message)
+        self.result = result
+
+
 @dataclass(frozen=True)
 class McpToolSpec:
     """Read-only metadata for one MCP tool."""
@@ -37,6 +45,7 @@ class McpToolRequest:
     """A validated, non-executing MCP tool request."""
 
     name: str
+    path: str
     arguments: Mapping[str, Any]
     endpoint: str
     protocol_version: str
@@ -139,6 +148,117 @@ class Giso(AnsibleGiso):
         self.fold(child)
         self.mcp_server = server_spec
         return self
+
+    def execute(self, request: Any) -> Any:
+        """Execute a prepared MCP tool request or delegate other request types."""
+        if not isinstance(request, McpToolRequest):
+            return super().execute(request)
+        result = self._call_mcp_tool(request)
+        value = self._mcp_result_value(result)
+        return self.results.add(f"mcp.{request.path}", value)
+
+    @classmethod
+    def _call_mcp_tool(cls, request: McpToolRequest) -> Mapping[str, Any]:
+        params = {
+            "name": request.name,
+            "arguments": dict(request.arguments),
+        }
+        if request.era == "modern":
+            payload = cls._modern_request_payload(
+                "tools/call",
+                request_id=100,
+                params=params,
+            )
+            headers = {
+                **request.headers,
+                "MCP-Protocol-Version": request.protocol_version,
+                "Mcp-Method": "tools/call",
+                "Mcp-Name": request.name,
+            }
+        else:
+            payload = {
+                "jsonrpc": "2.0",
+                "id": 100,
+                "method": "tools/call",
+                "params": params,
+            }
+            headers = {
+                **request.headers,
+                "MCP-Protocol-Version": request.protocol_version,
+            }
+            if request.session_id:
+                headers["MCP-Session-Id"] = request.session_id
+
+        response = cls._post_mcp(
+            request.endpoint,
+            payload,
+            headers=headers,
+        )
+        message = cls._decode_mcp_response(response)
+        error = message.get("error")
+        if isinstance(error, dict):
+            raise McpExecutionError(
+                cls._rpc_error_message("tools/call", error),
+                result=error,
+            )
+        result = message.get("result")
+        if not isinstance(result, dict):
+            raise McpExecutionError("MCP tools/call returned no result")
+
+        result_type = result.get("resultType")
+        if result_type in {"task", "input_required"}:
+            raise McpExecutionError(
+                f"MCP tools/call returned unsupported resultType {result_type!r}",
+                result=result,
+            )
+        if result.get("isError") is True:
+            raise McpExecutionError(
+                cls._mcp_tool_error_message(request.name, result),
+                result=result,
+            )
+        return result
+
+    @classmethod
+    def _mcp_result_value(cls, result: Mapping[str, Any]) -> Any:
+        if "structuredContent" in result:
+            return result["structuredContent"]
+
+        content = result.get("content")
+        if content is None:
+            return None
+        if not isinstance(content, list):
+            return content
+        decoded = [cls._mcp_content_value(item) for item in content]
+        if not decoded:
+            return None
+        if len(decoded) == 1:
+            return decoded[0]
+        return decoded
+
+    @staticmethod
+    def _mcp_content_value(item: Any) -> Any:
+        if not isinstance(item, dict):
+            return item
+        if item.get("type") != "text":
+            return dict(item)
+        text = item.get("text")
+        if not isinstance(text, str):
+            return dict(item)
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return text
+
+    @staticmethod
+    def _mcp_tool_error_message(name: str, result: Mapping[str, Any]) -> str:
+        content = result.get("content")
+        if isinstance(content, list):
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    text = item.get("text")
+                    if isinstance(text, str) and text:
+                        return f"MCP tool {name!r} failed: {text}"
+        return f"MCP tool {name!r} failed"
 
     @classmethod
     def _open_mcp_session(
@@ -373,6 +493,7 @@ class Giso(AnsibleGiso):
             )
             return McpToolRequest(
                 name=spec.name,
+                path=spec.path,
                 arguments=dict(kwargs),
                 endpoint=endpoint,
                 protocol_version=session.protocol_version,
