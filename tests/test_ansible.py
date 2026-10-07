@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import inspect
+from dataclasses import dataclass, field
+from typing import Any
 
 import pytest
 
@@ -8,20 +10,28 @@ from giso import AnsibleExecutionError, AnsibleInspectionError, Giso
 import giso.ansible as ansible_module
 
 
+COLLECTION = "community.general"
+NMCLI = "community.general.nmcli"
+INVENTORY = "./inventory.yml"
+
 MODULE_LIST = {
-    "community.general.nmcli": "Manage networking with nmcli",
+    NMCLI: "Manage networking with nmcli",
     "community.general.systemd_creds": "Manage systemd credentials",
     "other.collection.ignore_me": "Not part of the selected collection",
 }
 
 MODULE_DOCS = {
-    "community.general.nmcli": {
+    NMCLI: {
         "doc": {
             "short_description": "Manage networking with nmcli",
             "description": ["Create and modify NetworkManager connections."],
             "options": {
                 "conn_name": {"type": "str", "required": True, "aliases": ["name"]},
-                "state": {"type": "str", "default": "present", "choices": ["present", "absent"]},
+                "state": {
+                    "type": "str",
+                    "default": "present",
+                    "choices": ["present", "absent"],
+                },
                 "autoconnect": {"type": "bool"},
                 "_internal": {"type": "str"},
                 "not-valid": {"type": "str"},
@@ -37,27 +47,88 @@ MODULE_DOCS = {
 }
 
 
-def patch_ansible_doc(monkeypatch, *, listing=None, docs=None):
-    listing = MODULE_LIST if listing is None else listing
-    docs = MODULE_DOCS if docs is None else docs
+class AnsibleDocHarness:
+    def __init__(self, monkeypatch, *, listing=None, docs=None):
+        self.listing = MODULE_LIST if listing is None else listing
+        self.docs = MODULE_DOCS if docs is None else docs
 
-    def run(cls, *args):
-        if "-l" in args:
-            return listing
-        requested = [arg for arg in args if arg.startswith("community.general.")]
-        return {name: docs[name] for name in requested if name in docs}
+        def run(cls, *args):
+            if "-l" in args:
+                return self.listing
+            requested = [arg for arg in args if arg.startswith(f"{COLLECTION}.")]
+            return {name: self.docs[name] for name in requested if name in self.docs}
 
-    monkeypatch.setattr(Giso, "_run_ansible_doc", classmethod(run))
+        monkeypatch.setattr(Giso, "_run_ansible_doc", classmethod(run))
+
+
+@dataclass
+class AnsibleRunHarness:
+    monkeypatch: Any
+    results: dict[str, dict[str, Any]] = field(default_factory=dict)
+    returncode: int = 0
+    stdout: str = ""
+    stderr: str = ""
+    commands: list[list[str]] = field(default_factory=list)
+    write_results: bool = True
+
+    def __post_init__(self):
+        self.monkeypatch.setattr(
+            ansible_module.shutil,
+            "which",
+            lambda executable: f"/usr/bin/{executable}",
+        )
+
+        harness = self
+
+        class Completed:
+            def __init__(self):
+                self.returncode = harness.returncode
+                self.stdout = harness.stdout
+                self.stderr = harness.stderr
+
+        def run(command, **kwargs):
+            harness.commands.append(command)
+            if harness.write_results:
+                tree = command[command.index("--tree") + 1]
+                for host, result in harness.results.items():
+                    with open(
+                        ansible_module.os.path.join(tree, host),
+                        "w",
+                        encoding="utf-8",
+                    ) as handle:
+                        ansible_module.json.dump(result, handle)
+            return Completed()
+
+        self.monkeypatch.setattr(ansible_module.subprocess, "run", run)
+
+    @property
+    def command(self) -> list[str]:
+        return self.commands[-1]
+
+
+def nmcli_operation(monkeypatch, **ansible_kwargs):
+    AnsibleDocHarness(monkeypatch)
+    giso = Giso().ansible(COLLECTION, **ansible_kwargs)
+    return giso, giso.community.general.modules.nmcli
+
+
+def nmcli_request(*, host="localhost", inventory="localhost,", connection="local"):
+    return ansible_module.AnsibleModuleRequest(
+        fqcn=NMCLI,
+        args={"conn_name": "eth0"},
+        context=ansible_module.AnsibleExecutionContext(
+            host=host,
+            inventory=inventory,
+            connection=connection,
+        ),
+    )
 
 
 def test_ansible_collection_exposes_inspection_operations(monkeypatch):
-    patch_ansible_doc(monkeypatch)
+    _, operation = nmcli_operation(monkeypatch)
 
-    giso = Giso().ansible("community.general")
-
-    operation = giso.community.general.modules.nmcli
     assert operation.__doc__ == "Manage networking with nmcli"
-    assert operation.ansible_spec.fqcn == "community.general.nmcli"
+    assert operation.ansible_spec.fqcn == NMCLI
     assert operation.ansible_spec.description == (
         "Create and modify NetworkManager connections.",
     )
@@ -69,9 +140,8 @@ def test_ansible_collection_exposes_inspection_operations(monkeypatch):
 
 
 def test_ansible_module_signature_comes_from_documented_options(monkeypatch):
-    patch_ansible_doc(monkeypatch)
-
-    operation = Giso("ansible:community.general").community.general.modules.nmcli
+    AnsibleDocHarness(monkeypatch)
+    operation = Giso(f"ansible:{COLLECTION}").community.general.modules.nmcli
     signature = inspect.signature(operation)
 
     assert tuple(signature.parameters) == ("conn_name", "state", "autoconnect")
@@ -83,48 +153,44 @@ def test_ansible_module_signature_comes_from_documented_options(monkeypatch):
 
 
 def test_ansible_inspection_never_executes_module(monkeypatch):
-    patch_ansible_doc(monkeypatch)
-    giso = Giso().ansible("community.general")
+    giso, operation = nmcli_operation(monkeypatch)
 
     with pytest.raises(AnsibleInspectionError, match="inspection-only"):
-        giso.community.general.modules.nmcli(conn_name="eth0")
+        operation(conn_name="eth0")
 
     assert not giso.results.history
 
 
 def test_ansible_collection_records_provenance(monkeypatch):
-    patch_ansible_doc(monkeypatch)
-
-    giso = Giso().ansible("community.general")
+    giso, _ = nmcli_operation(monkeypatch)
 
     assert giso.provenance == [
         {
             "type": "ansible-collection",
-            "source": "ansible:community.general",
-            "collection": "community.general",
+            "source": f"ansible:{COLLECTION}",
+            "collection": COLLECTION,
             "modules": "community.general.nmcli,community.general.systemd_creds",
         }
     ]
 
 
 def test_ansible_collection_can_be_mounted_in_named_branch(monkeypatch):
-    patch_ansible_doc(monkeypatch)
-
-    giso = Giso(automation="ansible:community.general")
+    AnsibleDocHarness(monkeypatch)
+    giso = Giso(automation=f"ansible:{COLLECTION}")
 
     assert giso.automation.community.general.modules.nmcli.ansible_spec.name == "nmcli"
-    assert giso.provenance[0]["source"] == "ansible:community.general"
+    assert giso.provenance[0]["source"] == f"ansible:{COLLECTION}"
 
 
 def test_ansible_collection_is_atomic_when_module_docs_are_missing(monkeypatch):
-    patch_ansible_doc(
+    AnsibleDocHarness(
         monkeypatch,
-        docs={"community.general.nmcli": MODULE_DOCS["community.general.nmcli"]},
+        docs={NMCLI: MODULE_DOCS[NMCLI]},
     )
     giso = Giso()
 
     with pytest.raises(AnsibleInspectionError, match="no metadata"):
-        giso.ansible("community.general")
+        giso.ansible(COLLECTION)
 
     assert not giso.operations
     assert not giso.provenance
@@ -141,40 +207,44 @@ def test_ansible_collection_name_is_validated(collection):
 
 
 def test_ansible_collection_requires_modules(monkeypatch):
-    patch_ansible_doc(monkeypatch, listing={})
+    AnsibleDocHarness(monkeypatch, listing={})
 
     with pytest.raises(AnsibleInspectionError, match="exposes no modules"):
-        Giso().ansible("community.general")
+        Giso().ansible(COLLECTION)
 
 
 def test_ansible_doc_is_optional_until_resolver_is_used(monkeypatch):
     monkeypatch.setattr(ansible_module.shutil, "which", lambda executable: None)
 
     with pytest.raises(AnsibleInspectionError, match="requires ansible-doc"):
-        Giso._run_ansible_doc("-t", "module", "-l", "-j", "community.general")
+        Giso._run_ansible_doc("-t", "module", "-l", "-j", COLLECTION)
 
 
 def test_ansible_prepare_returns_validated_request(monkeypatch):
-    patch_ansible_doc(monkeypatch)
-    operation = Giso().ansible("community.general").community.general.modules.nmcli
+    giso, operation = nmcli_operation(monkeypatch)
 
-    request = operation.prepare(conn_name="eth0", state="present", autoconnect=True)
+    request = operation.prepare(
+        conn_name="eth0",
+        state="present",
+        autoconnect=True,
+    )
 
-    assert request.fqcn == "community.general.nmcli"
+    assert request.fqcn == NMCLI
     assert request.args == {
         "conn_name": "eth0",
         "state": "present",
         "autoconnect": True,
     }
-    assert request.context.host == "localhost"
-    assert request.context.inventory == "localhost,"
-    assert request.context.connection == "local"
-    assert not Giso().results.history
+    assert request.context == ansible_module.AnsibleExecutionContext(
+        host="localhost",
+        inventory="localhost,",
+        connection="local",
+    )
+    assert not giso.results.history
 
 
 def test_ansible_prepare_normalizes_aliases(monkeypatch):
-    patch_ansible_doc(monkeypatch)
-    operation = Giso().ansible("community.general").community.general.modules.nmcli
+    _, operation = nmcli_operation(monkeypatch)
 
     request = operation.prepare(name="eth0")
 
@@ -182,8 +252,7 @@ def test_ansible_prepare_normalizes_aliases(monkeypatch):
 
 
 def test_ansible_prepare_does_not_inject_documented_defaults(monkeypatch):
-    patch_ansible_doc(monkeypatch)
-    operation = Giso().ansible("community.general").community.general.modules.nmcli
+    _, operation = nmcli_operation(monkeypatch)
 
     request = operation.prepare(conn_name="eth0")
 
@@ -202,123 +271,72 @@ def test_ansible_prepare_does_not_inject_documented_defaults(monkeypatch):
     ],
 )
 def test_ansible_prepare_rejects_invalid_requests(monkeypatch, kwargs, message):
-    patch_ansible_doc(monkeypatch)
-    operation = Giso().ansible("community.general").community.general.modules.nmcli
+    _, operation = nmcli_operation(monkeypatch)
 
     with pytest.raises(AnsibleInspectionError, match=message):
         operation.prepare(**kwargs)
 
 
 def test_ansible_prepare_works_under_named_branch(monkeypatch):
-    patch_ansible_doc(monkeypatch)
-    giso = Giso(automation="ansible:community.general")
+    AnsibleDocHarness(monkeypatch)
+    giso = Giso(automation=f"ansible:{COLLECTION}")
 
     request = giso.automation.community.general.modules.nmcli.prepare(name="eth0")
 
-    assert request.fqcn == "community.general.nmcli"
+    assert request.fqcn == NMCLI
     assert request.args == {"conn_name": "eth0"}
     assert not giso.results.history
 
 
-def patch_local_execution(
-    monkeypatch,
-    tmp_path,
-    *,
-    result,
-    returncode=0,
-    stdout="",
-    stderr="",
-    result_host="localhost",
-    commands=None,
-):
-    monkeypatch.setattr(ansible_module.shutil, "which", lambda executable: f"/usr/bin/{executable}")
-
-    class Completed:
-        def __init__(self):
-            self.returncode = returncode
-            self.stdout = stdout
-            self.stderr = stderr
-
-    def run(command, **kwargs):
-        if commands is not None:
-            commands.append(command)
-        tree = command[command.index("--tree") + 1]
-        result_path = ansible_module.os.path.join(tree, result_host)
-        with open(result_path, "w", encoding="utf-8") as handle:
-            ansible_module.json.dump(result, handle)
-        return Completed()
-
-    monkeypatch.setattr(ansible_module.subprocess, "run", run)
-
-
-def test_ansible_execute_runs_prepared_request_on_localhost(monkeypatch, tmp_path):
-    patch_ansible_doc(monkeypatch)
-    patch_local_execution(
+def test_ansible_execute_runs_prepared_request_on_localhost(monkeypatch):
+    giso, operation = nmcli_operation(monkeypatch)
+    AnsibleRunHarness(
         monkeypatch,
-        tmp_path,
-        result={"changed": False, "msg": "ok"},
+        results={"localhost": {"changed": False, "msg": "ok"}},
     )
-    giso = Giso().ansible("community.general")
-    request = giso.community.general.modules.nmcli.prepare(name="eth0")
 
-    result = giso.execute(request)
+    result = giso.execute(operation.prepare(name="eth0"))
 
     assert result == {"changed": False, "msg": "ok"}
     assert giso.results.last == result
-    assert giso.results.history[-1][0] == "ansible.localhost.community.general.nmcli"
+    assert giso.results.history[-1][0] == f"ansible.localhost.{NMCLI}"
 
 
 def test_ansible_execute_requires_prepared_request():
     with pytest.raises(TypeError, match="AnsibleModuleRequest"):
-        Giso().execute({"fqcn": "community.general.nmcli"})
+        Giso().execute({"fqcn": NMCLI})
 
 
 def test_ansible_execute_requires_ansible_binary(monkeypatch):
     monkeypatch.setattr(ansible_module.shutil, "which", lambda executable: None)
-    request = ansible_module.AnsibleModuleRequest(
-        fqcn="community.general.nmcli",
-        args={"conn_name": "eth0"},
-    )
 
     with pytest.raises(AnsibleExecutionError, match="requires ansible"):
-        Giso().execute(request)
+        Giso().execute(nmcli_request())
 
 
-def test_ansible_execute_surfaces_module_failure(monkeypatch, tmp_path):
-    patch_local_execution(
+def test_ansible_execute_surfaces_module_failure(monkeypatch):
+    AnsibleRunHarness(
         monkeypatch,
-        tmp_path,
-        result={"failed": True, "msg": "device missing"},
+        results={"localhost": {"failed": True, "msg": "device missing"}},
         returncode=2,
-    )
-    request = ansible_module.AnsibleModuleRequest(
-        fqcn="community.general.nmcli",
-        args={"conn_name": "eth0"},
     )
 
     with pytest.raises(AnsibleExecutionError, match="device missing") as captured:
-        Giso().execute(request)
+        Giso().execute(nmcli_request())
 
     assert captured.value.result == {"failed": True, "msg": "device missing"}
-    assert not Giso().results.history
 
 
 def test_ansible_execute_rejects_missing_result_file(monkeypatch):
-    monkeypatch.setattr(ansible_module.shutil, "which", lambda executable: "/usr/bin/ansible")
-
-    class Completed:
-        returncode = 1
-        stdout = "broken output"
-        stderr = ""
-
-    monkeypatch.setattr(ansible_module.subprocess, "run", lambda *args, **kwargs: Completed())
-    request = ansible_module.AnsibleModuleRequest(
-        fqcn="community.general.nmcli",
-        args={"conn_name": "eth0"},
+    AnsibleRunHarness(
+        monkeypatch,
+        returncode=1,
+        stdout="broken output",
+        write_results=False,
     )
 
     with pytest.raises(AnsibleExecutionError, match="no valid result"):
-        Giso().execute(request)
+        Giso().execute(nmcli_request())
 
 
 def test_ansible_module_args_are_serialized_deterministically():
@@ -339,145 +357,114 @@ def test_ansible_module_args_are_serialized_deterministically():
 
 
 def test_ansible_prepare_carries_bound_inventory_context(monkeypatch):
-    patch_ansible_doc(monkeypatch)
-    giso = Giso().ansible(
-        "community.general",
-        inventory="./inventory.yml",
+    _, operation = nmcli_operation(
+        monkeypatch,
+        inventory=INVENTORY,
         host="gway-004",
     )
 
-    request = giso.community.general.modules.nmcli.prepare(name="eth0")
+    request = operation.prepare(name="eth0")
 
-    assert request.context.host == "gway-004"
-    assert request.context.inventory == "./inventory.yml"
-    assert request.context.connection is None
-
-
-def test_ansible_execute_uses_bound_inventory_and_host(monkeypatch, tmp_path):
-    patch_ansible_doc(monkeypatch)
-    commands = []
-    patch_local_execution(
-        monkeypatch,
-        tmp_path,
-        result={"changed": True},
-        result_host="gway-004",
-        commands=commands,
+    assert request.context == ansible_module.AnsibleExecutionContext(
+        host="gway-004",
+        inventory=INVENTORY,
+        connection=None,
     )
-    giso = Giso().ansible(
-        "community.general",
-        inventory="./inventory.yml",
+
+
+def test_ansible_execute_uses_bound_inventory_and_host(monkeypatch):
+    giso, operation = nmcli_operation(
+        monkeypatch,
+        inventory=INVENTORY,
         host="gway-004",
         connection="ssh",
     )
-    request = giso.community.general.modules.nmcli.prepare(name="eth0")
+    runner = AnsibleRunHarness(
+        monkeypatch,
+        results={"gway-004": {"changed": True}},
+    )
 
-    result = giso.execute(request)
+    result = giso.execute(operation.prepare(name="eth0"))
 
     assert result == {"changed": True}
-    command = commands[-1]
-    assert command[1] == "gway-004"
-    assert command[command.index("--inventory") + 1] == "./inventory.yml"
-    assert command[command.index("--connection") + 1] == "ssh"
-    assert giso.results.history[-1][0] == "ansible.gway-004.community.general.nmcli"
+    assert runner.command[1] == "gway-004"
+    assert runner.command[runner.command.index("--inventory") + 1] == INVENTORY
+    assert runner.command[runner.command.index("--connection") + 1] == "ssh"
+    assert giso.results.history[-1][0] == f"ansible.gway-004.{NMCLI}"
 
 
-def test_ansible_execute_uses_inventory_connection_when_unbound(monkeypatch, tmp_path):
-    patch_ansible_doc(monkeypatch)
-    commands = []
-    patch_local_execution(
+def test_ansible_execute_uses_inventory_connection_when_unbound(monkeypatch):
+    giso, operation = nmcli_operation(
         monkeypatch,
-        tmp_path,
-        result={"changed": False},
-        result_host="gway-004",
-        commands=commands,
-    )
-    giso = Giso().ansible(
-        "community.general",
-        inventory="./inventory.yml",
+        inventory=INVENTORY,
         host="gway-004",
     )
-    request = giso.community.general.modules.nmcli.prepare(name="eth0")
+    runner = AnsibleRunHarness(
+        monkeypatch,
+        results={"gway-004": {"changed": False}},
+    )
 
-    giso.execute(request)
+    giso.execute(operation.prepare(name="eth0"))
 
-    command = commands[-1]
-    assert "--connection" not in command
+    assert "--connection" not in runner.command
 
 
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [
         ({"host": "gway-004"}, "inventory is required"),
-        ({"inventory": "./inventory.yml"}, "host is required"),
-        ({"inventory": "" , "host": "gway-004"}, "inventory must be"),
-        ({"inventory": "./inventory.yml", "host": "bad host"}, "must not contain whitespace"),
-        ({"inventory": "./inventory.yml", "host": "gway-004", "connection": ""}, "connection must be"),
+        ({"inventory": INVENTORY}, "host is required"),
+        ({"inventory": "", "host": "gway-004"}, "inventory must be"),
+        ({"inventory": INVENTORY, "host": "bad host"}, "must not contain whitespace"),
+        (
+            {"inventory": INVENTORY, "host": "gway-004", "connection": ""},
+            "connection must be",
+        ),
         ({"connection": "ssh"}, "implicit localhost inventory only supports local"),
     ],
 )
 def test_ansible_execution_context_is_validated(kwargs, message):
     with pytest.raises(ValueError, match=message):
-        Giso._execution_context(**{
-            "inventory": kwargs.get("inventory"),
-            "host": kwargs.get("host"),
-            "connection": kwargs.get("connection"),
-        })
-
-
-def patch_group_execution(monkeypatch, *, results, returncode=0, commands=None):
-    monkeypatch.setattr(ansible_module.shutil, "which", lambda executable: "/usr/bin/ansible")
-
-    class Completed:
-        def __init__(self):
-            self.returncode = returncode
-            self.stdout = ""
-            self.stderr = ""
-
-    def run(command, **kwargs):
-        if commands is not None:
-            commands.append(command)
-        tree = command[command.index("--tree") + 1]
-        for host, result in results.items():
-            with open(ansible_module.os.path.join(tree, host), "w", encoding="utf-8") as handle:
-                ansible_module.json.dump(result, handle)
-        return Completed()
-
-    monkeypatch.setattr(ansible_module.subprocess, "run", run)
+        Giso._execution_context(
+            inventory=kwargs.get("inventory"),
+            host=kwargs.get("host"),
+            connection=kwargs.get("connection"),
+        )
 
 
 def test_ansible_group_execution_returns_results_by_host(monkeypatch):
-    patch_ansible_doc(monkeypatch)
-    commands = []
-    patch_group_execution(
+    giso, operation = nmcli_operation(
+        monkeypatch,
+        inventory=INVENTORY,
+        host="chargers",
+    )
+    runner = AnsibleRunHarness(
         monkeypatch,
         results={
             "gway-004": {"changed": True},
             "gway-005": {"changed": False},
         },
-        commands=commands,
     )
-    giso = Giso().ansible(
-        "community.general",
-        inventory="./inventory.yml",
-        host="chargers",
-    )
-    request = giso.community.general.modules.nmcli.prepare(name="eth0")
 
-    result = giso.execute(request)
+    result = giso.execute(operation.prepare(name="eth0"))
 
     assert result == {
         "gway-004": {"changed": True},
         "gway-005": {"changed": False},
     }
-    assert commands[-1][1] == "chargers"
-    assert giso.results["ansible.gway-004.community.general.nmcli"] == {"changed": True}
-    assert giso.results["ansible.gway-005.community.general.nmcli"] == {"changed": False}
-    assert giso.results["ansible.chargers.community.general.nmcli"] == result
+    assert runner.command[1] == "chargers"
+    assert giso.results[f"ansible.gway-004.{NMCLI}"] == {"changed": True}
+    assert giso.results[f"ansible.gway-005.{NMCLI}"] == {"changed": False}
+    assert giso.results[f"ansible.chargers.{NMCLI}"] == result
 
 
 def test_ansible_group_execution_preserves_partial_failures(monkeypatch):
-    patch_ansible_doc(monkeypatch)
-    patch_group_execution(
+    giso, operation = nmcli_operation(
+        monkeypatch,
+        inventory=INVENTORY,
+        host="chargers",
+    )
+    AnsibleRunHarness(
         monkeypatch,
         results={
             "gway-004": {"changed": True},
@@ -485,27 +472,21 @@ def test_ansible_group_execution_preserves_partial_failures(monkeypatch):
         },
         returncode=2,
     )
-    giso = Giso().ansible(
-        "community.general",
-        inventory="./inventory.yml",
-        host="chargers",
-    )
-    request = giso.community.general.modules.nmcli.prepare(name="eth0")
 
     with pytest.raises(AnsibleExecutionError, match="gway-005") as captured:
-        giso.execute(request)
+        giso.execute(operation.prepare(name="eth0"))
 
     assert captured.value.result == {
         "gway-004": {"changed": True},
         "gway-005": {"failed": True, "msg": "boom"},
     }
-    assert giso.results["ansible.gway-004.community.general.nmcli"] == {"changed": True}
-    assert giso.results["ansible.gway-005.community.general.nmcli"]["failed"] is True
-    assert giso.results["ansible.chargers.community.general.nmcli"] == captured.value.result
+    assert giso.results[f"ansible.gway-004.{NMCLI}"] == {"changed": True}
+    assert giso.results[f"ansible.gway-005.{NMCLI}"]["failed"] is True
+    assert giso.results[f"ansible.chargers.{NMCLI}"] == captured.value.result
 
 
 def test_ansible_group_execution_treats_unreachable_as_failure(monkeypatch):
-    patch_group_execution(
+    AnsibleRunHarness(
         monkeypatch,
         results={
             "gway-004": {"unreachable": True, "msg": "ssh failed"},
@@ -513,16 +494,14 @@ def test_ansible_group_execution_treats_unreachable_as_failure(monkeypatch):
         },
         returncode=4,
     )
-    request = ansible_module.AnsibleModuleRequest(
-        fqcn="community.general.nmcli",
-        args={"conn_name": "eth0"},
-        context=ansible_module.AnsibleExecutionContext(
-            host="chargers",
-            inventory="./inventory.yml",
-        ),
-    )
 
     with pytest.raises(AnsibleExecutionError, match="gway-004") as captured:
-        Giso().execute(request)
+        Giso().execute(
+            nmcli_request(
+                host="chargers",
+                inventory=INVENTORY,
+                connection=None,
+            )
+        )
 
     assert captured.value.result["gway-004"]["unreachable"] is True
