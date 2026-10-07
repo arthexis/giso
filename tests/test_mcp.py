@@ -1967,10 +1967,9 @@ def test_mcp_completion_uses_legacy_session(monkeypatch):
 
 def test_mcp_completion_is_absent_without_capability(monkeypatch):
     prompt_harness(monkeypatch)
-    resource_template_harness(monkeypatch)
-    prompt_giso = Giso().mcp(ENDPOINT)
+    giso = Giso().mcp(ENDPOINT)
 
-    assert not hasattr(prompt_giso.prompts.code_review, "complete")
+    assert not hasattr(giso.prompts.code_review, "complete")
 
 
 @pytest.mark.parametrize(
