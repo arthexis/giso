@@ -180,6 +180,36 @@ g.pypi("requests", version="2.32.5")
 
 GitHub references resolve to an exact commit before folding. PyPI references select a verified release artifact and reuse the archive pipeline. Neither resolver installs software into the Python environment.
 
+## Ansible inspection
+
+Installed Ansible collections can be inspected without importing Ansible internals or executing modules:
+
+```python
+g = Giso().ansible("community.general")
+nmcli = g.community.general.modules.nmcli
+```
+
+Giso uses the installed `ansible-doc` command to discover modules and their documentation. Each module is exposed as an inspection-only operation with an `AnsibleModuleSpec`, generated docstring, and Python signature derived from documented options.
+
+A module operation can prepare a validated request without executing Ansible:
+
+```python
+request = nmcli.prepare(
+    conn_name="wired",
+    state="present",
+)
+
+assert request.fqcn == "community.general.nmcli"
+assert request.args == {
+    "conn_name": "wired",
+    "state": "present",
+}
+```
+
+`prepare()` validates documented option names, required options, aliases, simple documented types, and choices. Aliases are normalized to their canonical option names. Documented defaults are intentionally not injected into the request; default handling remains Ansible's responsibility when execution is eventually added.
+
+Directly calling the module operation still raises `AnsibleInspectionError`. Inspection and preparation never execute a module, access inventory, or mutate a host.
+
 ## OpenAPI
 
 OpenAPI 3.x JSON descriptions can be loaded from local files or HTTPS sources:
