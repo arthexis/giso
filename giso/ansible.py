@@ -213,11 +213,11 @@ class Giso(DistributionGiso):
                 if detail:
                     message += f": {detail}"
                 error_result: Mapping[str, Any]
-        if len(results) == 1:
-            error_result = next(iter(results.values()))
-        else:
-            error_result = results
-        raise AnsibleExecutionError(message, result=error_result)
+                if len(results) == 1:
+                    error_result = next(iter(results.values()))
+                else:
+                    error_result = results
+                raise AnsibleExecutionError(message, result=error_result)
             return results
 
     @staticmethod
