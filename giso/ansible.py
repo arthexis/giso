@@ -52,7 +52,11 @@ class AnsibleModuleRequest:
 
     fqcn: str
     args: Mapping[str, Any]
-    context: AnsibleExecutionContext
+    context: AnsibleExecutionContext = AnsibleExecutionContext(
+        host="localhost",
+        inventory="localhost,",
+        connection="local",
+    )
 
 
 class Giso(DistributionGiso):
