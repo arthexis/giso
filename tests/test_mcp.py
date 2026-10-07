@@ -2218,7 +2218,16 @@ def test_mcp_subscription_filters_unsupported_list_change_requests(monkeypatch):
 
 
 def test_mcp_subscription_requires_requested_server_capability(monkeypatch):
-    modern_harness(monkeypatch)
+    def handler(payload, headers, allow_empty):
+        if payload["method"] == "server/discover":
+            result = modern_discover()
+            result["result"]["capabilities"] = {"tools": {}}
+            return response(result)
+        if payload["method"] == "tools/list":
+            return response(rpc_result(payload["id"], {"tools": [tool()]}))
+        raise AssertionError(payload)
+
+    McpHttpHarness(monkeypatch, handler)
     giso = Giso().mcp(ENDPOINT)
 
     with pytest.raises(McpInspectionError, match="supports none"):
@@ -2254,7 +2263,7 @@ def test_mcp_subscription_requires_acknowledgement_first(monkeypatch):
         [subscription_message("notifications/tools/list_changed")],
     )
 
-    with pytest.raises(McpExecutionError, match="not acknowledged"):
+    with pytest.raises(mcp_module.McpExecutionError, match="not acknowledged"):
         giso.subscribe(tools=True)
 
     assert stream.closed
@@ -2275,7 +2284,7 @@ def test_mcp_subscription_rejects_wrong_subscription_id(monkeypatch):
     )
     subscription = giso.subscribe(tools=True)
 
-    with pytest.raises(McpExecutionError, match="wrong subscriptionId"):
+    with pytest.raises(mcp_module.McpExecutionError, match="wrong subscriptionId"):
         subscription.next()
 
 
