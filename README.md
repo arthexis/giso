@@ -340,7 +340,7 @@ Each resource reader carries an `McpResourceSpec` in `.mcp_resource`. `resources
 
 Resource templates, subscriptions/listen, list-change notifications, and `input_required` continuation for resource reads are not part of this slice.
 
-MCP prompts are discovered when the server advertises the `prompts` capability. They are folded under `g.prompts` and remain explicitly user-invoked, matching MCP's prompt interaction model. `prompts/list` is paginated. citeturn699049search1
+MCP prompts are discovered when the server advertises the `prompts` capability. They are folded under `g.prompts` and remain explicitly user-invoked, matching MCP's prompt interaction model. `prompts/list` is paginated.
 
 ```python
 g = Giso().mcp("https://example.com/mcp")
@@ -351,11 +351,11 @@ prompt = g.prompts.code_review(
 )
 ```
 
-Each prompt operation carries an `McpPromptSpec` in `.mcp_prompt`, including title, description, advertised arguments, and icons. Required prompt arguments become required keyword-only Python parameters; optional arguments default to `None`. MCP prompt arguments are strings in the protocol, so Giso validates names, required values, unknown arguments, and string types before sending `prompts/get`. citeturn699049search1turn699049search2
+Each prompt operation carries an `McpPromptSpec` in `.mcp_prompt`, including title, description, advertised arguments, and icons. Required prompt arguments become required keyword-only Python parameters; optional arguments default to `None`. MCP prompt arguments are strings in the protocol, so Giso validates names, required values, unknown arguments, and string types before sending `prompts/get`.
 
 `prompts/get` returns an `McpPromptResult` containing the resolved description and a tuple of `McpPromptMessage` objects. Message roles and content mappings are preserved structurally, so text, resource links, embedded resources, images, audio, and other MCP content are not flattened into a single string.
 
-Modern prompt requests use the negotiated protocol metadata and method routing; legacy prompt requests preserve the negotiated session headers. Servers may answer `prompts/get` with `input_required`; that continuation is detected explicitly but is not yet resumed in this slice. Prompt list-change notifications and completion suggestions are also out of scope. citeturn699049search1
+Modern prompt requests use the negotiated protocol metadata and method routing; legacy prompt requests preserve the negotiated session headers. Servers may answer `prompts/get` with `input_required`; that continuation is detected explicitly but is not yet resumed in this slice. Prompt list-change notifications and completion suggestions are also out of scope.
 
 
 
