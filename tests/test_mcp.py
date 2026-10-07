@@ -278,7 +278,7 @@ def test_mcp_decodes_sse_json_rpc_response():
     [
         ("logs.search", "logs.search"),
         ("charger-reset", "charger_reset"),
-        ("2fa.status", "_2fa.status"),
+        ("2fa.status", "tool_2fa.status"),
     ],
 )
 def test_mcp_tool_names_map_to_python_paths(name, expected):
