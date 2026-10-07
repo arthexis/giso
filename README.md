@@ -326,6 +326,21 @@ Directly calling an MCP-backed operation still raises `McpInspectionError`; exec
 
 The negotiated endpoint metadata is available as `g.mcp_server`. MCP provenance records the endpoint, protocol era/version, and discovered tool names. Optional HTTP headers can be supplied to `mcp(..., headers={...})` for authentication; header values remain private and are never copied into provenance. Remote endpoints require HTTPS, while loopback HTTP is allowed for local development.
 
+MCP resources are discovered when the server advertises the `resources` capability. They are folded under a dedicated `resources` namespace using their advertised names:
+
+```python
+g = Giso().mcp("https://example.com/mcp")
+
+content = g.resources.project.main.read()
+```
+
+Each resource reader carries an `McpResourceSpec` in `.mcp_resource`. `resources/list` is paginated, and resource path normalization/collision handling follows the same deterministic rules used for MCP tools.
+
+`read()` sends `resources/read` with the resource URI. Modern requests use `Mcp-Method: resources/read` and `Mcp-Name: <resource URI>`; legacy requests preserve the negotiated session headers. A single returned content item becomes one `McpResourceContent`; multiple contents return a list. Text remains text, while MCP blob contents are strict-base64 decoded to `bytes`. URI, MIME type, and annotations are preserved alongside the decoded value.
+
+Resource templates, subscriptions/listen, list-change notifications, and `input_required` continuation for resource reads are not part of this slice.
+
+
 ## OpenAPI
 
 OpenAPI 3.x JSON descriptions can be loaded from local files or HTTPS sources:
