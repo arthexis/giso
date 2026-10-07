@@ -702,8 +702,172 @@ def test_mcp_execute_surfaces_tool_error(monkeypatch):
     assert not giso.results.history
 
 
-@pytest.mark.parametrize("result_type", ["task", "input_required"])
-def test_mcp_execute_rejects_unimplemented_continuations(monkeypatch, result_type):
+def test_mcp_direct_call_remains_blocked(monkeypatch):
+    modern_harness(monkeypatch)
+    giso = Giso().mcp(ENDPOINT)
+
+    with pytest.raises(McpInspectionError, match="inspection-only"):
+        giso.charger.status(charger_id="cp-1")
+
+
+def test_mcp_input_required_can_be_resumed(monkeypatch):
+    calls = []
+
+    def handler(payload, headers, allow_empty):
+        calls.append(payload)
+        if payload["method"] == "server/discover":
+            return response(modern_discover())
+        if payload["method"] == "tools/list":
+            return response(rpc_result(payload["id"], {"tools": [tool()]}))
+        if payload["method"] == "tools/call":
+            if "inputResponses" not in payload["params"]:
+                return response(rpc_result(payload["id"], {
+                    "resultType": "input_required",
+                    "inputRequests": {
+                        "confirm": {
+                            "method": "elicitation/create",
+                            "params": {"message": "Proceed?"},
+                        }
+                    },
+                    "requestState": "opaque-state",
+                }))
+            assert payload["params"]["inputResponses"] == {
+                "confirm": {"action": "accept", "content": {"ok": True}}
+            }
+            assert payload["params"]["requestState"] == "opaque-state"
+            return response(rpc_result(payload["id"], {
+                "resultType": "complete",
+                "structuredContent": {"status": "done"},
+            }))
+        raise AssertionError(payload)
+
+    McpHttpHarness(monkeypatch, handler)
+    giso = Giso().mcp(ENDPOINT)
+
+    pending = giso.execute(
+        giso.charger.status.prepare(charger_id="cp-1")
+    )
+
+    assert isinstance(pending, mcp_module.McpInputRequired)
+    assert "confirm" in pending.input_requests
+
+    retry = pending.respond({
+        "confirm": {"action": "accept", "content": {"ok": True}}
+    })
+    result = giso.execute(retry)
+
+    assert result == {"status": "done"}
+    assert giso.results.history[-1][0] == "mcp.charger.status"
+
+
+def test_mcp_task_can_be_polled_to_completion(monkeypatch):
+    polls = 0
+
+    def handler(payload, headers, allow_empty):
+        nonlocal polls
+        if payload["method"] == "server/discover":
+            return response(modern_discover())
+        if payload["method"] == "tools/list":
+            return response(rpc_result(payload["id"], {"tools": [tool()]}))
+        if payload["method"] == "tools/call":
+            return response(rpc_result(payload["id"], {
+                "resultType": "task",
+                "taskId": "task-1",
+                "status": "working",
+                "pollIntervalMs": 500,
+                "ttlMs": 10000,
+            }))
+        if payload["method"] == "tasks/get":
+            polls += 1
+            assert headers["Mcp-Name"] == "task-1"
+            if polls == 1:
+                return response(rpc_result(payload["id"], {
+                    "resultType": "complete",
+                    "taskId": "task-1",
+                    "status": "working",
+                    "pollIntervalMs": 250,
+                }))
+            return response(rpc_result(payload["id"], {
+                "resultType": "complete",
+                "taskId": "task-1",
+                "status": "completed",
+                "result": {
+                    "structuredContent": {"status": "ready"},
+                },
+            }))
+        raise AssertionError(payload)
+
+    McpHttpHarness(monkeypatch, handler)
+    giso = Giso().mcp(ENDPOINT)
+
+    task = giso.execute(giso.charger.status.prepare(charger_id="cp-1"))
+
+    assert isinstance(task, mcp_module.McpTask)
+    assert task.task_id == "task-1"
+    assert task.poll_interval_ms == 500
+
+    task = giso.execute(task)
+    assert isinstance(task, mcp_module.McpTask)
+    assert task.poll_interval_ms == 250
+
+    result = giso.execute(task)
+    assert result == {"status": "ready"}
+
+
+def test_mcp_task_input_required_can_be_updated(monkeypatch):
+    stage = "call"
+
+    def handler(payload, headers, allow_empty):
+        nonlocal stage
+        if payload["method"] == "server/discover":
+            return response(modern_discover())
+        if payload["method"] == "tools/list":
+            return response(rpc_result(payload["id"], {"tools": [tool()]}))
+        if payload["method"] == "tools/call":
+            return response(rpc_result(payload["id"], {
+                "resultType": "task",
+                "taskId": "task-2",
+                "status": "working",
+            }))
+        if payload["method"] == "tasks/get":
+            return response(rpc_result(payload["id"], {
+                "resultType": "complete",
+                "taskId": "task-2",
+                "status": "input_required",
+                "inputRequests": {
+                    "confirm": {
+                        "method": "elicitation/create",
+                        "params": {"message": "Proceed?"},
+                    }
+                },
+            }))
+        if payload["method"] == "tasks/update":
+            assert headers["Mcp-Name"] == "task-2"
+            assert payload["params"]["inputResponses"] == {
+                "confirm": {"action": "accept", "content": {"ok": True}}
+            }
+            stage = "updated"
+            return response(rpc_result(payload["id"], {
+                "resultType": "complete",
+            }))
+        raise AssertionError(payload)
+
+    McpHttpHarness(monkeypatch, handler)
+    giso = Giso().mcp(ENDPOINT)
+    task = giso.execute(giso.charger.status.prepare(charger_id="cp-1"))
+
+    pending = giso.execute(task)
+    assert isinstance(pending, mcp_module.McpTaskInputRequired)
+
+    resumed = giso.execute(pending.respond({
+        "confirm": {"action": "accept", "content": {"ok": True}}
+    }))
+
+    assert stage == "updated"
+    assert resumed == pending.task
+
+
+def test_mcp_task_failure_is_reported(monkeypatch):
     def handler(payload, headers, allow_empty):
         if payload["method"] == "server/discover":
             return response(modern_discover())
@@ -711,23 +875,24 @@ def test_mcp_execute_rejects_unimplemented_continuations(monkeypatch, result_typ
             return response(rpc_result(payload["id"], {"tools": [tool()]}))
         if payload["method"] == "tools/call":
             return response(rpc_result(payload["id"], {
-                "resultType": result_type,
-                "content": [],
+                "resultType": "task",
+                "taskId": "task-3",
+                "status": "working",
+            }))
+        if payload["method"] == "tasks/get":
+            return response(rpc_result(payload["id"], {
+                "resultType": "complete",
+                "taskId": "task-3",
+                "status": "failed",
+                "error": {"code": -32000, "message": "boom"},
             }))
         raise AssertionError(payload)
 
     McpHttpHarness(monkeypatch, handler)
     giso = Giso().mcp(ENDPOINT)
+    task = giso.execute(giso.charger.status.prepare(charger_id="cp-1"))
 
-    with pytest.raises(mcp_module.McpExecutionError, match="unsupported resultType") as captured:
-        giso.execute(giso.charger.status.prepare(charger_id="cp-1"))
+    with pytest.raises(mcp_module.McpExecutionError, match="failed") as captured:
+        giso.execute(task)
 
-    assert captured.value.result["resultType"] == result_type
-
-
-def test_mcp_direct_call_remains_blocked(monkeypatch):
-    modern_harness(monkeypatch)
-    giso = Giso().mcp(ENDPOINT)
-
-    with pytest.raises(McpInspectionError, match="inspection-only"):
-        giso.charger.status(charger_id="cp-1")
+    assert captured.value.result["status"] == "failed"
