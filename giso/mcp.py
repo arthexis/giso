@@ -42,7 +42,7 @@ class McpToolSpec:
 
 @dataclass(frozen=True)
 class McpToolRequest:
-    """A validated, non-executing MCP tool request."""
+    """A validated MCP tool request."""
 
     name: str
     path: str
@@ -52,6 +52,61 @@ class McpToolRequest:
     era: str
     session_id: str | None
     headers: Mapping[str, str]
+    input_responses: Mapping[str, Any] | None = None
+    request_state: str | None = None
+
+
+@dataclass(frozen=True)
+class McpInputRequired:
+    """A manual multi-round-trip continuation for a tool call."""
+
+    request: McpToolRequest
+    input_requests: Mapping[str, Any]
+    request_state: str | None
+
+    def respond(self, responses: Mapping[str, Any]) -> McpToolRequest:
+        return McpToolRequest(
+            name=self.request.name,
+            path=self.request.path,
+            arguments=dict(self.request.arguments),
+            endpoint=self.request.endpoint,
+            protocol_version=self.request.protocol_version,
+            era=self.request.era,
+            session_id=self.request.session_id,
+            headers=dict(self.request.headers),
+            input_responses=dict(responses),
+            request_state=self.request_state,
+        )
+
+
+@dataclass(frozen=True)
+class McpTask:
+    """A resumable MCP task returned by tools/call."""
+
+    request: McpToolRequest
+    task_id: str
+    status: str
+    poll_interval_ms: int | None = None
+    ttl_ms: int | None = None
+
+
+@dataclass(frozen=True)
+class McpTaskInputRequired:
+    """Input required while an MCP task is running."""
+
+    task: McpTask
+    input_requests: Mapping[str, Any]
+
+    def respond(self, responses: Mapping[str, Any]) -> "McpTaskUpdate":
+        return McpTaskUpdate(self.task, dict(responses))
+
+
+@dataclass(frozen=True)
+class McpTaskUpdate:
+    """Responses supplied to an input-required MCP task."""
+
+    task: McpTask
+    input_responses: Mapping[str, Any]
 
 
 @dataclass(frozen=True)
@@ -150,12 +205,15 @@ class Giso(AnsibleGiso):
         return self
 
     def execute(self, request: Any) -> Any:
-        """Execute a prepared MCP tool request or delegate other request types."""
-        if not isinstance(request, McpToolRequest):
-            return super().execute(request)
-        result = self._call_mcp_tool(request)
-        value = self._mcp_result_value(result)
-        return self.results.add(f"mcp.{request.path}", value)
+        """Execute or continue MCP requests, otherwise delegate to parent request types."""
+        if isinstance(request, McpToolRequest):
+            result = self._call_mcp_tool(request)
+            return self._handle_mcp_tool_result(request, result)
+        if isinstance(request, McpTask):
+            return self._poll_mcp_task(request)
+        if isinstance(request, McpTaskUpdate):
+            return self._update_mcp_task(request)
+        return super().execute(request)
 
     @classmethod
     def _call_mcp_tool(cls, request: McpToolRequest) -> Mapping[str, Any]:
@@ -163,6 +221,10 @@ class Giso(AnsibleGiso):
             "name": request.name,
             "arguments": dict(request.arguments),
         }
+        if request.input_responses is not None:
+            params["inputResponses"] = dict(request.input_responses)
+        if request.request_state is not None:
+            params["requestState"] = request.request_state
         if request.era == "modern":
             payload = cls._modern_request_payload(
                 "tools/call",
@@ -205,17 +267,145 @@ class Giso(AnsibleGiso):
         if not isinstance(result, dict):
             raise McpExecutionError("MCP tools/call returned no result")
 
-        result_type = result.get("resultType")
-        if result_type in {"task", "input_required"}:
-            raise McpExecutionError(
-                f"MCP tools/call returned unsupported resultType {result_type!r}",
-                result=result,
-            )
         if result.get("isError") is True:
             raise McpExecutionError(
                 cls._mcp_tool_error_message(request.name, result),
                 result=result,
             )
+        return result
+
+    def _handle_mcp_tool_result(
+        self,
+        request: McpToolRequest,
+        result: Mapping[str, Any],
+    ) -> Any:
+        result_type = result.get("resultType")
+        if result_type == "input_required":
+            input_requests = result.get("inputRequests")
+            if not isinstance(input_requests, dict):
+                input_requests = {}
+            request_state = result.get("requestState")
+            if request_state is not None and not isinstance(request_state, str):
+                raise McpExecutionError(
+                    "MCP input_required returned invalid requestState",
+                    result=result,
+                )
+            return McpInputRequired(
+                request=request,
+                input_requests=dict(input_requests),
+                request_state=request_state,
+            )
+        if result_type == "task":
+            return self._mcp_task_from_result(request, result)
+
+        value = self._mcp_result_value(result)
+        return self.results.add(f"mcp.{request.path}", value)
+
+    @classmethod
+    def _mcp_task_from_result(
+        cls,
+        request: McpToolRequest,
+        result: Mapping[str, Any],
+    ) -> McpTask:
+        task_id = result.get("taskId")
+        status = result.get("status")
+        if not isinstance(task_id, str) or not task_id:
+            raise McpExecutionError("MCP task result has no valid taskId", result=result)
+        if not isinstance(status, str) or not status:
+            raise McpExecutionError("MCP task result has no valid status", result=result)
+        poll_interval = result.get("pollIntervalMs")
+        ttl = result.get("ttlMs")
+        return McpTask(
+            request=request,
+            task_id=task_id,
+            status=status,
+            poll_interval_ms=poll_interval if isinstance(poll_interval, int) else None,
+            ttl_ms=ttl if isinstance(ttl, int) else None,
+        )
+
+    def _poll_mcp_task(self, task: McpTask) -> Any:
+        result = self._mcp_task_request(
+            task,
+            "tasks/get",
+            {"taskId": task.task_id},
+        )
+        status = result.get("status")
+        if status == "working":
+            return self._mcp_task_from_result(task.request, result)
+        if status == "input_required":
+            updated = self._mcp_task_from_result(task.request, result)
+            input_requests = result.get("inputRequests")
+            if not isinstance(input_requests, dict):
+                input_requests = {}
+            return McpTaskInputRequired(updated, dict(input_requests))
+        if status == "completed":
+            final = result.get("result")
+            if not isinstance(final, dict):
+                raise McpExecutionError("Completed MCP task returned no result", result=result)
+            if final.get("isError") is True:
+                raise McpExecutionError(
+                    self._mcp_tool_error_message(task.request.name, final),
+                    result=final,
+                )
+            value = self._mcp_result_value(final)
+            return self.results.add(f"mcp.{task.request.path}", value)
+        if status in {"failed", "cancelled"}:
+            raise McpExecutionError(
+                f"MCP task {task.task_id!r} ended with status {status!r}",
+                result=result,
+            )
+        raise McpExecutionError(
+            f"MCP task {task.task_id!r} returned unknown status {status!r}",
+            result=result,
+        )
+
+    def _update_mcp_task(self, update: McpTaskUpdate) -> McpTask:
+        self._mcp_task_request(
+            update.task,
+            "tasks/update",
+            {
+                "taskId": update.task.task_id,
+                "inputResponses": dict(update.input_responses),
+            },
+        )
+        return update.task
+
+    @classmethod
+    def _mcp_task_request(
+        cls,
+        task: McpTask,
+        method: str,
+        params: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        request = task.request
+        if request.era != "modern":
+            raise McpExecutionError("MCP task continuation requires the modern protocol")
+
+        payload = cls._modern_request_payload(
+            method,
+            request_id=200,
+            params=params,
+        )
+        response = cls._post_mcp(
+            request.endpoint,
+            payload,
+            headers={
+                **request.headers,
+                "MCP-Protocol-Version": request.protocol_version,
+                "Mcp-Method": method,
+                "Mcp-Name": task.task_id,
+            },
+        )
+        message = cls._decode_mcp_response(response)
+        error = message.get("error")
+        if isinstance(error, dict):
+            raise McpExecutionError(
+                cls._rpc_error_message(method, error),
+                result=error,
+            )
+        result = message.get("result")
+        if not isinstance(result, dict):
+            raise McpExecutionError(f"MCP {method} returned no result")
         return result
 
     @classmethod
@@ -728,7 +918,11 @@ class Giso(AnsibleGiso):
                 "name": "giso",
                 "version": "0.1.0",
             },
-            "io.modelcontextprotocol/clientCapabilities": {},
+            "io.modelcontextprotocol/clientCapabilities": {
+                "extensions": {
+                    "io.modelcontextprotocol/tasks": {},
+                },
+            },
         }
         return {
             "jsonrpc": "2.0",
