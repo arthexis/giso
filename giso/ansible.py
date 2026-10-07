@@ -236,9 +236,19 @@ class Giso(DistributionGiso):
         ]
         detail = ", ".join(failed_hosts)
         message = f"Ansible module {request.fqcn} failed"
-        if detail:
-            message += f" on: {detail}"
-        raise AnsibleExecutionError(message, result=results)
+        error_result: Mapping[str, Any]
+        if len(results) == 1:
+            error_result = next(iter(results.values()))
+            result_message = error_result.get("msg")
+            if isinstance(result_message, str) and result_message:
+                message += f": {result_message}"
+            elif detail:
+                message += f" on: {detail}"
+        else:
+            error_result = results
+            if detail:
+                message += f" on: {detail}"
+        raise AnsibleExecutionError(message, result=error_result)
 
     @classmethod
     def _execution_context(
