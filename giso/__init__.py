@@ -5,7 +5,7 @@ from .ansible import (
     AnsibleModuleRequest,
     AnsibleModuleSpec,
 )
-from .mcp import Giso, McpExecutionError, McpInspectionError, McpServerSpec, McpToolRequest, McpToolSpec
+from .mcp import Giso, McpExecutionError, McpInputRequired, McpInspectionError, McpServerSpec, McpTask, McpTaskInputRequired, McpTaskUpdate, McpToolRequest, McpToolSpec
 from .core import CapabilityRequest, Namespace, Results, Sigil
 from .soap_envelope import SoapRequest
 from .soap_schema import UnsupportedSoapSchema
@@ -20,8 +20,12 @@ __all__ = [
     "CapabilityRequest",
     "Giso",
     "McpExecutionError",
+    "McpInputRequired",
     "McpInspectionError",
     "McpServerSpec",
+    "McpTask",
+    "McpTaskInputRequired",
+    "McpTaskUpdate",
     "McpToolRequest",
     "McpToolSpec",
     "Namespace",
