@@ -424,22 +424,95 @@ def test_ansible_execution_context_is_validated(kwargs, message):
         })
 
 
-def test_ansible_execute_rejects_multiple_host_results(monkeypatch):
+def patch_group_execution(monkeypatch, *, results, returncode=0, commands=None):
     monkeypatch.setattr(ansible_module.shutil, "which", lambda executable: "/usr/bin/ansible")
 
     class Completed:
-        returncode = 0
-        stdout = ""
-        stderr = ""
+        def __init__(self):
+            self.returncode = returncode
+            self.stdout = ""
+            self.stderr = ""
 
     def run(command, **kwargs):
+        if commands is not None:
+            commands.append(command)
         tree = command[command.index("--tree") + 1]
-        for host in ("gway-004", "gway-005"):
+        for host, result in results.items():
             with open(ansible_module.os.path.join(tree, host), "w", encoding="utf-8") as handle:
-                ansible_module.json.dump({"changed": False}, handle)
+                ansible_module.json.dump(result, handle)
         return Completed()
 
     monkeypatch.setattr(ansible_module.subprocess, "run", run)
+
+
+def test_ansible_group_execution_returns_results_by_host(monkeypatch):
+    patch_ansible_doc(monkeypatch)
+    commands = []
+    patch_group_execution(
+        monkeypatch,
+        results={
+            "gway-004": {"changed": True},
+            "gway-005": {"changed": False},
+        },
+        commands=commands,
+    )
+    giso = Giso().ansible(
+        "community.general",
+        inventory="./inventory.yml",
+        host="chargers",
+    )
+    request = giso.community.general.modules.nmcli.prepare(name="eth0")
+
+    result = giso.execute(request)
+
+    assert result == {
+        "gway-004": {"changed": True},
+        "gway-005": {"changed": False},
+    }
+    assert commands[-1][1] == "chargers"
+    assert giso.results["ansible.gway-004.community.general.nmcli"] == {"changed": True}
+    assert giso.results["ansible.gway-005.community.general.nmcli"] == {"changed": False}
+    assert giso.results["ansible.chargers.community.general.nmcli"] == result
+
+
+def test_ansible_group_execution_preserves_partial_failures(monkeypatch):
+    patch_ansible_doc(monkeypatch)
+    patch_group_execution(
+        monkeypatch,
+        results={
+            "gway-004": {"changed": True},
+            "gway-005": {"failed": True, "msg": "boom"},
+        },
+        returncode=2,
+    )
+    giso = Giso().ansible(
+        "community.general",
+        inventory="./inventory.yml",
+        host="chargers",
+    )
+    request = giso.community.general.modules.nmcli.prepare(name="eth0")
+
+    with pytest.raises(AnsibleExecutionError, match="gway-005") as captured:
+        giso.execute(request)
+
+    assert captured.value.result == {
+        "gway-004": {"changed": True},
+        "gway-005": {"failed": True, "msg": "boom"},
+    }
+    assert giso.results["ansible.gway-004.community.general.nmcli"] == {"changed": True}
+    assert giso.results["ansible.gway-005.community.general.nmcli"]["failed"] is True
+    assert giso.results["ansible.chargers.community.general.nmcli"] == captured.value.result
+
+
+def test_ansible_group_execution_treats_unreachable_as_failure(monkeypatch):
+    patch_group_execution(
+        monkeypatch,
+        results={
+            "gway-004": {"unreachable": True, "msg": "ssh failed"},
+            "gway-005": {"changed": False},
+        },
+        returncode=4,
+    )
     request = ansible_module.AnsibleModuleRequest(
         fqcn="community.general.nmcli",
         args={"conn_name": "eth0"},
@@ -449,5 +522,7 @@ def test_ansible_execute_rejects_multiple_host_results(monkeypatch):
         ),
     )
 
-    with pytest.raises(AnsibleExecutionError, match="exactly one is required"):
+    with pytest.raises(AnsibleExecutionError, match="gway-004") as captured:
         Giso().execute(request)
+
+    assert captured.value.result["gway-004"]["unreachable"] is True
