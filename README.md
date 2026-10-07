@@ -297,7 +297,30 @@ For modern `2026-07-28` servers, Giso sends the required `MCP-Protocol-Version`,
 
 Successful `tools/call` results prefer MCP `structuredContent`. Otherwise text content is returned as a string, or JSON-decoded when the text is valid JSON; multiple content blocks are returned as a list, while non-text blocks remain mappings.
 
-JSON-RPC failures and MCP tool results with `isError: true` raise `McpExecutionError` and preserve the structured error/result payload on the exception. Modern `task` and `input_required` result types are reported as unsupported continuations for now instead of being misinterpreted as completed calls.
+JSON-RPC failures and MCP tool results with `isError: true` raise `McpExecutionError` and preserve the structured error/result payload on the exception. Modern continuations are also exposed explicitly rather than hidden behind background work.
+
+A direct multi-round-trip request returns `McpInputRequired`:
+
+```python
+pending = g.execute(request)
+retry = pending.respond({
+    "confirm": {"action": "accept", "content": {"ok": True}},
+})
+result = g.execute(retry)
+```
+
+The opaque MCP `requestState` is echoed unchanged on the retry, while `inputResponses` are attached to the original `tools/call` arguments with a fresh JSON-RPC request.
+
+A task-augmented tool call returns `McpTask`:
+
+```python
+task = g.execute(request)
+task = g.execute(task)   # one tasks/get poll
+```
+
+Each task execution performs exactly one `tasks/get` poll. Working tasks return an updated `McpTask`; completed tasks return the decoded tool result. Task `pollIntervalMs` and `ttlMs` remain visible to the caller rather than causing Giso to sleep or poll in the background.
+
+When a task reaches `input_required`, polling returns `McpTaskInputRequired`. Its `.respond(...)` creates an `McpTaskUpdate`; executing that sends `tasks/update`, after which the caller can continue polling the returned task. Task routing follows the 2026-07-28 extension requirement that `Mcp-Name` carry the task ID for `tasks/get` and `tasks/update`.
 
 Directly calling an MCP-backed operation still raises `McpInspectionError`; execution remains explicit through `prepare()` followed by `execute()`. Resources, prompts, subscriptions, task continuation, input-required continuation, and stdio transport are not implemented yet.
 
