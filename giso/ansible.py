@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import inspect
 import json
+import os
+import shlex
 import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -12,6 +15,14 @@ from .distribution import Giso as DistributionGiso
 
 class AnsibleInspectionError(RuntimeError):
     """Raised when installed Ansible content cannot be inspected safely."""
+
+
+class AnsibleExecutionError(RuntimeError):
+    """Raised when a prepared Ansible module request cannot execute successfully."""
+
+    def __init__(self, message: str, *, result: Mapping[str, Any] | None = None):
+        super().__init__(message)
+        self.result = result
 
 
 @dataclass(frozen=True)
@@ -73,6 +84,91 @@ class Giso(DistributionGiso):
             child.provenance.append(provenance)
         self.fold(child)
         return self
+
+
+    def execute(self, request: AnsibleModuleRequest) -> Mapping[str, Any]:
+        """Execute one prepared Ansible module request against localhost."""
+        if not isinstance(request, AnsibleModuleRequest):
+            raise TypeError("Ansible execution requires an AnsibleModuleRequest from prepare()")
+        result = self._run_ansible_local(request)
+        operation_name = f"ansible.localhost.{request.fqcn}"
+        return self.results.add(operation_name, result)
+
+    @classmethod
+    def _run_ansible_local(cls, request: AnsibleModuleRequest) -> Mapping[str, Any]:
+        executable = shutil.which("ansible")
+        if executable is None:
+            raise AnsibleExecutionError(
+                "Ansible execution requires ansible from an installed ansible-core"
+            )
+
+        module_args = cls._serialize_module_args(request.args)
+        with tempfile.TemporaryDirectory(prefix="giso-ansible-") as tree:
+            command = [
+                executable,
+                "localhost",
+                "--inventory",
+                "localhost,",
+                "--connection",
+                "local",
+                "--module-name",
+                request.fqcn,
+                "--args",
+                module_args,
+                "--tree",
+                tree,
+            ]
+            try:
+                completed = subprocess.run(
+                    command,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=300,
+                    env=os.environ.copy(),
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise AnsibleExecutionError(
+                    f"Cannot execute Ansible module {request.fqcn}"
+                ) from exc
+
+            result_path = os.path.join(tree, "localhost")
+            try:
+                with open(result_path, encoding="utf-8") as handle:
+                    result = json.load(handle)
+            except (OSError, json.JSONDecodeError) as exc:
+                detail = completed.stderr.strip() or completed.stdout.strip()
+                message = f"Ansible returned no valid result for {request.fqcn}"
+                if detail:
+                    message += f": {detail}"
+                raise AnsibleExecutionError(message) from exc
+
+            if not isinstance(result, dict):
+                raise AnsibleExecutionError(
+                    f"Ansible returned an invalid result for {request.fqcn}"
+                )
+            if completed.returncode != 0 or result.get("failed") is True:
+                detail = result.get("msg")
+                message = f"Ansible module {request.fqcn} failed"
+                if isinstance(detail, str) and detail:
+                    message += f": {detail}"
+                raise AnsibleExecutionError(message, result=result)
+            return result
+
+    @staticmethod
+    def _serialize_module_args(args: Mapping[str, Any]) -> str:
+        parts = []
+        for name, value in args.items():
+            if isinstance(value, bool):
+                rendered = "true" if value else "false"
+            elif value is None:
+                rendered = "null"
+            elif isinstance(value, (list, dict)):
+                rendered = json.dumps(value, separators=(",", ":"))
+            else:
+                rendered = str(value)
+            parts.append(f"{name}={shlex.quote(rendered)}")
+        return " ".join(parts)
 
     @classmethod
     def _list_ansible_modules(cls, collection: str) -> tuple[str, ...]:
