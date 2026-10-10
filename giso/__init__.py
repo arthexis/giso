@@ -1,4 +1,11 @@
-from .ansible import AnsibleExecutionContext, AnsibleExecutionError, AnsibleInspectionError, AnsibleModuleRequest, AnsibleModuleSpec, Giso
+from .ansible import (
+    AnsibleExecutionContext,
+    AnsibleExecutionError,
+    AnsibleInspectionError,
+    AnsibleModuleRequest,
+    AnsibleModuleSpec,
+)
+from .mcp import Giso, McpCompletion, McpExecutionError, McpSubscription, McpSubscriptionEvent, McpInputRequired, McpInspectionError, McpPromptArgument, McpPromptMessage, McpPromptResult, McpPromptSpec, McpResourceContent, McpResourceSpec, McpResourceTemplateSpec, McpServerSpec, McpTask, McpTaskInputRequired, McpTaskUpdate, McpToolRequest, McpToolSpec
 from .core import CapabilityRequest, Namespace, Results, Sigil
 from .soap_envelope import SoapRequest
 from .soap_schema import UnsupportedSoapSchema
@@ -12,6 +19,25 @@ __all__ = [
     "AnsibleModuleSpec",
     "CapabilityRequest",
     "Giso",
+    "McpCompletion",
+    "McpSubscription",
+    "McpSubscriptionEvent",
+    "McpExecutionError",
+    "McpInputRequired",
+    "McpInspectionError",
+    "McpPromptArgument",
+    "McpPromptMessage",
+    "McpPromptResult",
+    "McpPromptSpec",
+    "McpResourceContent",
+    "McpResourceSpec",
+    "McpResourceTemplateSpec",
+    "McpServerSpec",
+    "McpTask",
+    "McpTaskInputRequired",
+    "McpTaskUpdate",
+    "McpToolRequest",
+    "McpToolSpec",
     "Namespace",
     "Results",
     "Sigil",

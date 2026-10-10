@@ -250,6 +250,147 @@ Every concrete host result is recorded under `ansible.<host>.<fqcn>`. Multi-host
 
 Directly calling the module operation still raises `AnsibleInspectionError`; execution remains explicit through `prepare()` followed by `execute()`. Plays, roles, and playbooks are not part of this slice.
 
+## MCP inspection
+
+Streamable HTTP MCP servers can be folded as read-only capability sources:
+
+```python
+g = Giso("mcp:https://example.com/mcp")
+
+# equivalent explicit resolver
+h = Giso().mcp("https://example.com/mcp")
+```
+
+Giso negotiates the MCP protocol before listing tools. It first probes the modern `2026-07-28` lifecycle with `server/discover`; if the endpoint reports that method as unsupported, it falls back to the legacy `initialize` handshake and preserves the negotiated session ID and protocol version for `tools/list`.
+
+Tool names map to normal Giso operation paths. Dotted MCP names preserve hierarchy, while non-Python characters are normalized deterministically. Normalization collisions fail explicitly instead of silently overwriting one tool with another.
+
+Each operation carries an `McpToolSpec` in `.mcp_tool`, a docstring from the MCP tool description, and a Python signature derived from the tool's JSON Schema `inputSchema`.
+
+An inspected tool can prepare a validated request without calling the server:
+
+```python
+request = g.charger.status.prepare(
+    charger_id="cp-1",
+    verbose=True,
+)
+
+assert request.name == "charger.status"
+assert request.arguments == {
+    "charger_id": "cp-1",
+    "verbose": True,
+}
+```
+
+`prepare()` validates the practical JSON Schema subset needed for MCP tool inputs: required properties, primitive types, nullable type unions, `enum`, `const`, arrays/items, nested objects, and `additionalProperties`. Schema defaults are deliberately not injected; prepared requests contain only caller-supplied arguments.
+
+The resulting `McpToolRequest` retains the endpoint, negotiated protocol era/version, legacy session ID when present, and private request headers so a later execution slice can send `tools/call` without renegotiating the request context.
+
+Prepared requests can be executed explicitly:
+
+```python
+request = g.charger.status.prepare(charger_id="cp-1")
+result = g.execute(request)
+```
+
+For modern `2026-07-28` servers, Giso sends the required `MCP-Protocol-Version`, `Mcp-Method`, and `Mcp-Name` headers. Legacy requests preserve the negotiated protocol version and session ID.
+
+Successful `tools/call` results prefer MCP `structuredContent`. Otherwise text content is returned as a string, or JSON-decoded when the text is valid JSON; multiple content blocks are returned as a list, while non-text blocks remain mappings.
+
+JSON-RPC failures and MCP tool results with `isError: true` raise `McpExecutionError` and preserve the structured error/result payload on the exception. Modern continuations are also exposed explicitly rather than hidden behind background work.
+
+A direct multi-round-trip request returns `McpInputRequired`:
+
+```python
+pending = g.execute(request)
+retry = pending.respond({
+    "confirm": {"action": "accept", "content": {"ok": True}},
+})
+result = g.execute(retry)
+```
+
+The opaque MCP `requestState` is echoed unchanged on the retry, while `inputResponses` are attached to the original `tools/call` arguments with a fresh JSON-RPC request.
+
+A task-augmented tool call returns `McpTask`:
+
+```python
+task = g.execute(request)
+task = g.execute(task)   # one tasks/get poll
+```
+
+Each task execution performs exactly one `tasks/get` poll. Working tasks return an updated `McpTask`; completed tasks return the decoded tool result. Task `pollIntervalMs` and `ttlMs` remain visible to the caller rather than causing Giso to sleep or poll in the background.
+
+When a task reaches `input_required`, polling returns `McpTaskInputRequired`. Its `.respond(...)` creates an `McpTaskUpdate`; executing that sends `tasks/update`, after which the caller can continue polling the returned task. Task routing follows the 2026-07-28 extension requirement that `Mcp-Name` carry the task ID for `tasks/get` and `tasks/update`.
+
+Directly calling an MCP-backed operation still raises `McpInspectionError`; execution remains explicit through `prepare()` followed by `execute()`. Resources, prompts, subscriptions, task continuation, input-required continuation, and stdio transport are not implemented yet.
+
+The negotiated endpoint metadata is available as `g.mcp_server`. MCP provenance records the endpoint, protocol era/version, and discovered tool names. Optional HTTP headers can be supplied to `mcp(..., headers={...})` for authentication; header values remain private and are never copied into provenance. Remote endpoints require HTTPS, while loopback HTTP is allowed for local development.
+
+MCP resources are discovered when the server advertises the `resources` capability. They are folded under a dedicated `resources` namespace using their advertised names:
+
+```python
+g = Giso().mcp("https://example.com/mcp")
+
+content = g.resources.project.main.read()
+```
+
+Each resource reader carries an `McpResourceSpec` in `.mcp_resource`. `resources/list` is paginated, and resource path normalization/collision handling follows the same deterministic rules used for MCP tools.
+
+`read()` sends `resources/read` with the resource URI. Modern requests use `Mcp-Method: resources/read` and `Mcp-Name: <resource URI>`; legacy requests preserve the negotiated session headers. A single returned content item becomes one `McpResourceContent`; multiple contents return a list. Text remains text, while MCP blob contents are strict-base64 decoded to `bytes`. URI, MIME type, and annotations are preserved alongside the decoded value.
+
+Resource templates are also discovered through paginated `resources/templates/list` and folded under a separate namespace:
+
+```python
+profile = g.resource_templates.user.profile(
+    user_id="alice",
+    detail="full",
+)
+```
+
+Each callable carries an `McpResourceTemplateSpec` in `.mcp_resource_template`, including the RFC 6570 URI template, advertised metadata, annotations, and icons. Its keyword-only signature is derived from the template variables. Undefined variables default to `None` and are omitted according to RFC 6570 expansion semantics.
+
+Giso expands RFC 6570 operators, scalar/list/map values, explode modifiers, and prefix modifiers using stdlib URI quoting, then reuses the ordinary `resources/read` path for the resulting concrete URI. Unknown template variables fail before any request is sent.
+
+Resource template path normalization and collision handling are atomic, template-only MCP servers are accepted, and discovered URI templates are included in MCP provenance. Completion suggestions are supported when the server advertises the `completions` capability. Prompt and resource-template callables gain a `.complete(...)` helper:
+
+```python
+suggestions = g.prompts.code_review.complete(
+    "language",
+    "p",
+)
+
+template_suggestions = g.resource_templates.user.profile.complete(
+    "detail",
+    "f",
+    context={"user_id": "alice"},
+)
+```
+
+`completion/complete` uses an MCP prompt reference for prompts and the original RFC 6570 URI template as a resource-template reference. The argument payload carries the argument name and partial value, while already-filled string arguments can be supplied through `context` to narrow server-side suggestions.
+
+The result is `McpCompletion`, preserving `values`, optional `total`, and optional `has_more`. Completion helpers are only attached when the server advertises support, and modern/legacy routing follows the same negotiated request path as the rest of the MCP resolver.
+
+Subscriptions/listen, list-change notifications, and `input_required` continuation for resource reads are not part of this slice.
+
+MCP prompts are discovered when the server advertises the `prompts` capability. They are folded under `g.prompts` and remain explicitly user-invoked, matching MCP's prompt interaction model. `prompts/list` is paginated.
+
+```python
+g = Giso().mcp("https://example.com/mcp")
+
+prompt = g.prompts.code_review(
+    code="print('hello')",
+    language="python",
+)
+```
+
+Each prompt operation carries an `McpPromptSpec` in `.mcp_prompt`, including title, description, advertised arguments, and icons. Required prompt arguments become required keyword-only Python parameters; optional arguments default to `None`. MCP prompt arguments are strings in the protocol, so Giso validates names, required values, unknown arguments, and string types before sending `prompts/get`.
+
+`prompts/get` returns an `McpPromptResult` containing the resolved description and a tuple of `McpPromptMessage` objects. Message roles and content mappings are preserved structurally, so text, resource links, embedded resources, images, audio, and other MCP content are not flattened into a single string.
+
+Modern prompt requests use the negotiated protocol metadata and method routing; legacy prompt requests preserve the negotiated session headers. Servers may answer `prompts/get` with `input_required`; that continuation is detected explicitly but is not yet resumed in this slice. Prompt list-change notifications and completion suggestions are also out of scope.
+
+
+
 ## OpenAPI
 
 OpenAPI 3.x JSON descriptions can be loaded from local files or HTTPS sources:
@@ -369,6 +510,7 @@ Exhausted sources are discarded. Live iterator state is intentionally not cloned
 - PyPI references using `pypi:project[@version]`
 - OpenAPI 3.x JSON descriptions using `openapi:<source>`
 - WSDL 1.1 SOAP descriptions using `soap:<source>`
+- Streamable HTTP MCP servers using `mcp:<endpoint>`
 - nested lists/tuples/sets
 - finite-looking `Sized` iterables
 - deferred iterators/generators
@@ -378,6 +520,6 @@ Raw Python source strings are not accepted by `fold()`; use `Giso.compile(...)` 
 
 Imported callables from a folded module are ignored; only functions and classes defined by that module are attached. Private package paths are skipped.
 
-`fold()` mutates the existing object and returns the same `Giso`, so notebook-style incremental construction works naturally. Direct resolver methods such as `distribution()`, `github()`, `pypi()`, `openapi()`, and `soap()` follow the same fluent convention.
+`fold()` mutates the existing object and returns the same `Giso`, so notebook-style incremental construction works naturally. Direct resolver methods such as `distribution()`, `github()`, `pypi()`, `mcp()`, `openapi()`, and `soap()` follow the same fluent convention.
 
 The project intentionally has no third-party runtime dependencies and no CLI, MCP server, deployment machinery, or application-specific integrations. The goal remains narrow: explore a live object that can fold software and described external capability surfaces into one callable namespace.
